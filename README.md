@@ -29,6 +29,8 @@ Example:
 ## Run API
 
 ```bash
+lsof -nP -iTCP:8787 -sTCP:LISTEN
+kill <PID>
 .venv/bin/uvicorn ai_native.api:app --host 127.0.0.1 --port 8787 --reload
 ```
 
