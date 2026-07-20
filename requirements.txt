@@ -3,3 +3,7 @@ langchain-core
 langgraph
 fastapi
 uvicorn
+openai
+PyJWT[crypto]
+psycopg[binary]
+python-dotenv

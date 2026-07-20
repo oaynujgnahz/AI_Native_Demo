@@ -10,6 +10,7 @@ class BusinessContext:
     company_id: Optional[str] = None
     permissions: List[str] = field(default_factory=lambda: ["cmpf:read"])
     tenant_id: str = "local"
+    auth_token: Optional[str] = None
 
     def has_permission(self, permission: str) -> bool:
         return permission in self.permissions

@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CMPF Enterprise Agent Gateway Demo</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Noto Sans JP", system-ui, sans-serif; color: #17202a; background: #eef2f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { width: min(1120px, calc(100% - 32px)); margin: 24px auto; display: grid; grid-template-columns: 290px 1fr; gap: 18px; }
+    aside, section { background: white; border: 1px solid #dbe3ec; border-radius: 14px; box-shadow: 0 10px 30px rgba(20, 45, 70, .06); }
+    aside { padding: 20px; height: fit-content; }
+    section { min-height: 720px; display: flex; flex-direction: column; overflow: hidden; }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    .sub { color: #607286; font-size: 12px; margin: 0 0 18px; }
+    label { display: block; margin: 13px 0 5px; font-size: 12px; color: #4c6074; }
+    input, select, textarea, button { font: inherit; }
+    input, select, textarea { width: 100%; border: 1px solid #ccd7e2; border-radius: 8px; padding: 9px 10px; background: #fff; }
+    textarea { min-height: 72px; resize: vertical; }
+    button { border: 0; border-radius: 8px; background: #1268c4; color: white; padding: 10px 14px; cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .55; }
+    button.secondary { background: #e8eef5; color: #29445f; }
+    .auth-actions { display: flex; gap: 8px; margin: 14px 0 8px; }
+    .auth-state { min-height: 36px; padding: 9px 10px; border-radius: 8px; background: #f1f5f9; color: #4c6074; font-size: 12px; }
+    .quick { display: grid; gap: 7px; margin-top: 18px; }
+    .quick button { text-align: left; font-size: 12px; }
+    header { padding: 16px 20px; border-bottom: 1px solid #e4eaf0; display: flex; align-items: center; justify-content: space-between; }
+    #messages { flex: 1; padding: 20px; overflow: auto; }
+    .message { max-width: 88%; margin: 0 0 14px; padding: 12px 14px; border-radius: 12px; white-space: pre-wrap; line-height: 1.55; }
+    .user { margin-left: auto; background: #1268c4; color: #fff; }
+    .assistant { background: #f1f5f9; }
+    .meta { color: #718196; font-size: 11px; margin-bottom: 5px; }
+    .chart { height: 330px; margin-top: 10px; background: #fff; border-radius: 10px; }
+    details { margin-top: 8px; font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { border-bottom: 1px solid #e4eaf0; padding: 6px; text-align: left; }
+    form { padding: 14px 18px; border-top: 1px solid #e4eaf0; display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+    #status { font-size: 12px; color: #607286; }
+    @media (max-width: 760px) { main { grid-template-columns: 1fr; } section { min-height: 620px; } }
+  </style>
+</head>
+<body>
+<main>
+  <aside>
+    <h1>Enterprise Agent</h1>
+    <p class="sub">Independent Gateway + CMPF read-only APIs</p>
+    <div class="auth-actions">
+      <button type="button" id="login">Keycloak Login</button>
+      <button type="button" id="logout" class="secondary" disabled>Clear Token</button>
+    </div>
+    <div id="auth-state" class="auth-state">Checking login…</div>
+    <label for="company">Company ID</label><input id="company" placeholder="Token companyId" />
+    <label for="year">Calculation year</label><input id="year" type="number" value="2025" />
+    <label for="scope">Scope</label><select id="scope"><option>1</option><option>2</option><option>3</option></select>
+    <div class="quick">
+      <button type="button" data-prompt="Scope {scope} の構成を円グラフで表示">Scope composition</button>
+      <button type="button" data-prompt="{year}年の月別排出量推移グラフを表示">Monthly trend</button>
+      <button type="button" data-prompt="{year}年の排出量上位10活動項目を表示">Top 10 activities</button>
+    </div>
+  </aside>
+  <section>
+    <header><strong>CMPF Copilot Demo</strong><span id="status">Ready</span></header>
+    <div id="messages"></div>
+    <form id="chat"><textarea id="question" placeholder="質問を入力してください"></textarea><button>Send</button></form>
+  </section>
+</main>
+<script>
+  let conversationId = null;
+  let accessToken = null;
+  let oidcConfig = null;
+  const byId = id => document.getElementById(id);
+  const statusNode = byId('status');
+  const messages = byId('messages');
+
+  function base64Url(bytes) {
+    const binary = String.fromCharCode(...new Uint8Array(bytes));
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function redirectUri() { return `${location.origin}${location.pathname}`; }
+  function randomValue(size = 32) { return base64Url(crypto.getRandomValues(new Uint8Array(size))); }
+  async function sha256(value) { return crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)); }
+  function tokenClaims(token) {
+    try {
+      const value = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      return JSON.parse(decodeURIComponent(escape(atob(value))));
+    } catch (_) { return {}; }
+  }
+  async function setAuthenticated(token) {
+    accessToken = token;
+    conversationId = null;
+    const claims = tokenClaims(token);
+    if (claims.companyId !== undefined) byId('company').value = String(claims.companyId);
+    byId('auth-state').textContent = 'Checking CMPF APIs…';
+    byId('login').disabled = true;
+    byId('logout').disabled = false;
+    statusNode.textContent = 'Connecting…';
+    const response = await fetch('/v1/cmpf/connection', { headers: headers() });
+    if (!response.ok) {
+      let detail = {};
+      try { detail = (await response.json()).detail || {}; } catch (_) {}
+      const stage = detail.stage ? ` ${detail.stage}` : '';
+      const upstream = detail.upstream_status ? ` upstream ${detail.upstream_status}` : '';
+      throw new Error(`CMPF${stage} failed (${response.status}${upstream})`);
+    }
+    const connection = await response.json();
+    byId('company').value = connection.company_id;
+    byId('auth-state').textContent = `Connected: ${connection.company_name} · ${connection.direct_children.length} child companies`;
+    statusNode.textContent = 'CMPF connected';
+  }
+  function clearAuthentication() {
+    accessToken = null;
+    conversationId = null;
+    byId('auth-state').textContent = 'Not logged in';
+    byId('login').disabled = false;
+    byId('logout').disabled = true;
+    statusNode.textContent = 'Login required';
+  }
+  async function beginLogin() {
+    byId('auth-state').textContent = 'Redirecting to Keycloak…';
+    statusNode.textContent = 'Authenticating…';
+    const verifier = randomValue(64);
+    const state = randomValue(24);
+    const challenge = base64Url(await sha256(verifier));
+    sessionStorage.setItem('cmpf_pkce_verifier', verifier);
+    sessionStorage.setItem('cmpf_oidc_state', state);
+    const params = new URLSearchParams({
+      client_id: oidcConfig.client_id,
+      redirect_uri: redirectUri(),
+      response_type: 'code',
+      scope: 'openid profile',
+      state,
+      code_challenge: challenge,
+      code_challenge_method: 'S256'
+    });
+    location.assign(`${oidcConfig.authorization_endpoint}?${params}`);
+  }
+  async function completeLogin(params) {
+    const expectedState = sessionStorage.getItem('cmpf_oidc_state');
+    const verifier = sessionStorage.getItem('cmpf_pkce_verifier');
+    sessionStorage.removeItem('cmpf_oidc_state');
+    sessionStorage.removeItem('cmpf_pkce_verifier');
+    if (!expectedState || params.get('state') !== expectedState || !verifier) throw new Error('OIDC state validation failed');
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: oidcConfig.client_id,
+      redirect_uri: redirectUri(),
+      code: params.get('code'),
+      code_verifier: verifier
+    });
+    const response = await fetch(oidcConfig.token_endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+    if (!response.ok) throw new Error(`Keycloak token exchange failed (${response.status})`);
+    const payload = await response.json();
+    if (!payload.access_token) throw new Error('Keycloak returned no access token');
+    await setAuthenticated(payload.access_token);
+    history.replaceState({}, document.title, redirectUri());
+  }
+  async function initializeAuthentication() {
+    const response = await fetch('/v1/public-config');
+    if (!response.ok) throw new Error('Gateway OIDC configuration unavailable');
+    oidcConfig = await response.json();
+    const params = new URLSearchParams(location.search);
+    if (params.has('error')) throw new Error(params.get('error_description') || params.get('error'));
+    if (params.has('code')) await completeLogin(params);
+    else clearAuthentication();
+  }
+  function headers() {
+    if (!accessToken) throw new Error('Please log in with Keycloak first');
+    return { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
+  }
+  function addMessage(role, text) {
+    const node = document.createElement('div'); node.className = `message ${role}`;
+    const meta = document.createElement('div'); meta.className = 'meta'; meta.textContent = role === 'user' ? 'You' : 'CMPF Agent';
+    const content = document.createElement('div'); content.textContent = text;
+    node.append(meta, content); messages.appendChild(node); messages.scrollTop = messages.scrollHeight; return node;
+  }
+  async function ensureConversation() {
+    if (conversationId) return conversationId;
+    const response = await fetch('/v1/conversations', { method: 'POST', headers: headers(), body: '{}' });
+    if (!response.ok) throw new Error(await response.text());
+    conversationId = (await response.json()).id; return conversationId;
+  }
+  function safeOption(spec) {
+    if (!['pie', 'line', 'horizontal_bar', 'grouped_bar'].includes(spec.chart_type)) throw new Error('Unsupported chart');
+    const categories = spec.categories.map(value => String(value));
+    const series = spec.series.map(item => ({ name: String(item.name), values: item.values.map(value => Number(value)) }));
+    if (categories.length > 100 || series.length > 5 || series.reduce((count, item) => count + item.values.length, 0) > 100 || series.some(item => item.values.length !== categories.length || item.values.some(value => !Number.isFinite(value)))) throw new Error('Invalid chart data');
+    if (spec.chart_type === 'pie') return { tooltip: { trigger: 'item' }, title: { text: spec.title }, series: [{ type: 'pie', radius: ['38%', '68%'], data: categories.map((name, i) => ({ name, value: series[0].values[i] })) }] };
+    const horizontal = spec.chart_type === 'horizontal_bar';
+    const bar = horizontal || spec.chart_type === 'grouped_bar';
+    return { tooltip: { trigger: 'axis' }, legend: { top: 28 }, title: { text: spec.title }, xAxis: horizontal ? { type: 'value', name: spec.unit } : { type: 'category', data: categories }, yAxis: horizontal ? { type: 'category', data: categories } : { type: 'value', name: spec.unit }, series: series.map(item => ({ name: item.name, type: bar ? 'bar' : 'line', smooth: !bar, data: item.values })) };
+  }
+  function renderChart(parent, spec) {
+    const chartNode = document.createElement('div'); chartNode.className = 'chart'; parent.appendChild(chartNode);
+    echarts.init(chartNode).setOption(safeOption(spec));
+    const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Data table';
+    const table = document.createElement('table'); const head = table.insertRow(); head.insertCell().textContent = 'Category'; spec.series.forEach(item => { head.insertCell().textContent = `${item.name} (${spec.unit})`; });
+    spec.categories.forEach((category, index) => { const row = table.insertRow(); row.insertCell().textContent = category; spec.series.forEach(item => { row.insertCell().textContent = item.values[index]; }); });
+    details.append(summary, table); parent.appendChild(details);
+  }
+  function parseSse(text) {
+    return text.trim().split('\n\n').filter(Boolean).map(block => { const lines = block.split('\n'); return { event: lines[0].slice(7), data: JSON.parse(lines.slice(1).join('\n').slice(6)) }; });
+  }
+  async function requestConversation(question, retryOnMissing = true) {
+    const id = await ensureConversation();
+    const response = await fetch(`/v1/conversations/${id}/messages/stream`, { method: 'POST', headers: headers(), body: JSON.stringify({ message: question, context: { company_id: byId('company').value, year: Number(byId('year').value), locale: 'ja' } }) });
+    if (response.ok) return response;
+    let payload = null;
+    try { payload = await response.json(); } catch (_) {}
+    if (retryOnMissing && response.status === 404 && payload?.detail?.code === 'conversation_not_found') {
+      conversationId = null;
+      return requestConversation(question, false);
+    }
+    throw new Error(payload ? JSON.stringify(payload) : `Gateway request failed (${response.status})`);
+  }
+  async function send(question) {
+    addMessage('user', question); statusNode.textContent = 'Running…';
+    try {
+      const response = await requestConversation(question);
+      let assistant = null;
+      for (const item of parseSse(await response.text())) {
+        if (item.event === 'answer.delta') assistant = addMessage('assistant', item.data.delta);
+        if (item.event === 'visualization' && assistant) renderChart(assistant, item.data);
+        if (item.event === 'status') statusNode.textContent = item.data.tool;
+      }
+      statusNode.textContent = 'Completed';
+    } catch (error) { addMessage('assistant', `Error: ${error.message}`); statusNode.textContent = 'Error'; }
+  }
+  document.querySelectorAll('[data-prompt]').forEach(button => button.addEventListener('click', () => { const prompt = button.dataset.prompt.replace('{year}', byId('year').value).replace('{scope}', byId('scope').value); byId('question').value = prompt; send(prompt); }));
+  byId('chat').addEventListener('submit', event => { event.preventDefault(); const value = byId('question').value.trim(); if (value) { byId('question').value = ''; send(value); } });
+  byId('login').addEventListener('click', () => beginLogin().catch(error => { byId('auth-state').textContent = error.message; }));
+  byId('logout').addEventListener('click', clearAuthentication);
+  initializeAuthentication().catch(error => { clearAuthentication(); byId('auth-state').textContent = error.message; });
+</script>
+</body>
+</html>

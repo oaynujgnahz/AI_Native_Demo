@@ -96,7 +96,7 @@ if (series.length > 5 ||
 
 Run: `.venv/bin/python -m unittest tests.test_enterprise_gateway.ChartSpecTest -v`
 
-Run: `node --check ai_native/demo.html`
+Run: `awk '/<script>/{flag=1;next}/<\/script>/{flag=0}flag' ai_native/demo.html | node --check`
 
 Expected: all commands exit 0.
 
@@ -452,7 +452,7 @@ Document that `get_monthly_emission_trend_chart` maps to `GET /analysis/scopeEmi
 ```bash
 .venv/bin/python -m unittest discover -s tests -q
 .venv/bin/python -m compileall -q ai_native app.py
-node --check ai_native/demo.html
+awk '/<script>/{flag=1;next}/<\/script>/{flag=0}flag' ai_native/demo.html | node --check
 git diff --check
 ```
 

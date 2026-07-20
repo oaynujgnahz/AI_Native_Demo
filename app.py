@@ -4,9 +4,11 @@ from langchain_core.messages import HumanMessage
 
 from ai_native.agent.graph import build_graph
 from ai_native.gateway.cmpf_client import CmpfGateway
+from ai_native.logging_config import configure_logging
 
 
 def main() -> None:
+    configure_logging()
     graph = build_graph(CmpfGateway())
     print("CMPF LangGraph Agent started. Type 'exit' to quit.")
     while True:
