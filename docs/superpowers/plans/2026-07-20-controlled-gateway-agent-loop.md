@@ -829,7 +829,7 @@ git commit -m "feat: add optional OpenTelemetry tracing"
 **Interfaces:**
 - README contains runnable commands for memory, PostgreSQL, OTel/Jaeger, real CMPF, resume, cancellation, and trace lookup.
 
-- [ ] **Step 1: Write failing documentation contract**
+- [x] **Step 1: Write failing documentation contract**
 
 ```python
 class ControlledLoopDocumentationTest(unittest.TestCase):
@@ -846,7 +846,7 @@ class ControlledLoopDocumentationTest(unittest.TestCase):
 Run: `.venv/bin/python -m unittest tests.test_enterprise_gateway.ControlledLoopDocumentationTest -v`  
 Expected: FAIL on the first missing term.
 
-- [ ] **Step 3: Write the operations and architecture guide**
+- [x] **Step 3: Write the operations and architecture guide**
 
 Document module responsibilities, graph nodes, safe observation/artifact separation, budgets, run statuses, environment variables, Compose commands, streaming requests, clarification/resume, server cancel, and Jaeger lookup by run ID. State that CMPF remains unchanged and authoritative.
 
@@ -873,7 +873,7 @@ Expected: exit 0 with no output.
 5. Cancel a waiting/running run; confirm no later analysis call or visualization.
 6. Enable OTel; confirm one Jaeger trace contains FastAPI, graph nodes, LLM, CMPF/httpx, and SSE spans.
 
-- [ ] **Step 6: Commit documentation**
+- [x] **Step 6: Commit documentation**
 
 ```bash
 git add README.md tests/test_enterprise_gateway.py docs/superpowers/plans/2026-07-20-controlled-gateway-agent-loop.md

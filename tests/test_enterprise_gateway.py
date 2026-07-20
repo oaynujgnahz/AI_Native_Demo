@@ -223,6 +223,21 @@ class DocumentationContractTest(unittest.TestCase):
         self.assertIn("3 preparation", readme)
 
 
+class ControlledLoopDocumentationTest(unittest.TestCase):
+    def test_readme_documents_runtime_and_observability(self):
+        readme = Path("README.md").read_text(encoding="utf-8")
+        for required in (
+            "Policy-gated ReAct",
+            "waiting_for_user",
+            "OTEL_ENABLED",
+            "http://localhost:16686",
+            "clarification",
+            "/runs/{runId}/cancel",
+            "checkpoint",
+        ):
+            self.assertIn(required, readme)
+
+
 class CmpfAnalysisContractTest(unittest.TestCase):
     def test_mock_period_comparison_matches_real_cmpf_response_shape(self):
         from ai_native.gateway.cmpf_client import CmpfGateway
