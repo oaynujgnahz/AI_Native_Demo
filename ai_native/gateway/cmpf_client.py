@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import os
+import logging
+from time import perf_counter
 from typing import Any, Dict, Optional
 
 import httpx
+
+
+logger = logging.getLogger(__name__)
 
 
 class CmpfGateway:
@@ -377,13 +382,13 @@ class CmpfGateway:
         params: Dict[str, Any],
         auth_token: Optional[str] = None,
     ) -> Dict[str, Any]:
-        response = self.http_client.get(
-            f"{self.carbon_api_base_url}{path}",
+        return self._request_json(
+            "get",
+            self.carbon_api_base_url,
+            path,
             params=params,
-            headers=self._headers(auth_token=auth_token),
+            auth_token=auth_token,
         )
-        response.raise_for_status()
-        return response.json()
 
     def _post_carbon_api(
         self,
@@ -391,13 +396,13 @@ class CmpfGateway:
         payload: Dict[str, Any],
         auth_token: Optional[str] = None,
     ) -> Dict[str, Any]:
-        response = self.http_client.post(
-            f"{self.carbon_api_base_url}{path}",
-            json=payload,
-            headers=self._headers(auth_token=auth_token),
+        return self._request_json(
+            "post",
+            self.carbon_api_base_url,
+            path,
+            payload=payload,
+            auth_token=auth_token,
         )
-        response.raise_for_status()
-        return response.json()
 
     def _get_user_api(
         self,
@@ -405,13 +410,62 @@ class CmpfGateway:
         params: Dict[str, Any],
         auth_token: Optional[str] = None,
     ) -> Dict[str, Any]:
-        response = self.http_client.get(
-            f"{self.user_api_base_url}{path}",
+        return self._request_json(
+            "get",
+            self.user_api_base_url,
+            path,
             params=params,
-            headers=self._headers(auth_token=auth_token),
+            auth_token=auth_token,
         )
-        response.raise_for_status()
-        return response.json()
+
+    def _request_json(
+        self,
+        method: str,
+        base_url: str,
+        path: str,
+        *,
+        params: Dict[str, Any] | None = None,
+        payload: Dict[str, Any] | None = None,
+        auth_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        started = perf_counter()
+        status: int | None = None
+        try:
+            request = getattr(self.http_client, method)
+            kwargs: dict[str, Any] = {"headers": self._headers(auth_token=auth_token)}
+            if params is not None:
+                kwargs["params"] = params
+            if payload is not None:
+                kwargs["json"] = payload
+            response = request(f"{base_url}{path}", **kwargs)
+            status = int(getattr(response, "status_code", 200))
+            response.raise_for_status()
+            body = response.json()
+            logger.info(
+                "CMPF request completed",
+                extra={
+                    "endpoint": path,
+                    "duration": round(perf_counter() - started, 6),
+                    "status": status,
+                    "count": _result_count(body),
+                },
+            )
+            return body
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            if response is not None:
+                status = getattr(response, "status_code", status)
+            logger.warning(
+                "CMPF request failed",
+                extra={
+                    "endpoint": path,
+                    "duration": round(perf_counter() - started, 6),
+                    "status": status or 0,
+                    "error": type(exc).__name__,
+                    "count": 0,
+                },
+            )
+            raise
 
     def _headers(self, auth_token: Optional[str] = None) -> Dict[str, str]:
         headers = {
@@ -501,3 +555,14 @@ class CmpfGateway:
             "companyAddress": "123 Main St", "companyPhone": "123-456-7890",
             "companyEmail": "info@mockcompany.com",
         }}
+
+
+def _result_count(payload: Any) -> int:
+    if isinstance(payload, dict):
+        body = payload.get("body", payload)
+        if isinstance(body, (list, tuple, set, dict)):
+            return len(body)
+        return 1
+    if isinstance(payload, (list, tuple, set)):
+        return len(payload)
+    return 0

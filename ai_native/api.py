@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import inspect
+import logging
+from time import perf_counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
+from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -38,8 +41,11 @@ from ai_native.gateway.errors import GatewayAgentError
 from ai_native.gateway.runtime_context import RuntimeContext
 from ai_native.gateway.tooling import ToolCatalog, build_enterprise_catalog
 from ai_native.logging_config import configure_logging
+from ai_native.observability import bind_log_context, clear_log_context
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationCreateRequest(BaseModel):
@@ -180,6 +186,34 @@ def create_app(
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
     )
+
+    @app.middleware("http")
+    async def request_log_context(request: Request, call_next):
+        trace_id = request.headers.get("X-Request-ID") or str(uuid4())
+        token = bind_log_context(trace_id=trace_id, endpoint=request.url.path)
+        started = perf_counter()
+        try:
+            response = await call_next(request)
+            logger.info(
+                "request completed",
+                extra={
+                    "status": response.status_code,
+                    "duration": round(perf_counter() - started, 6),
+                },
+            )
+            return response
+        except Exception as exc:
+            logger.error(
+                "request failed",
+                extra={
+                    "status": 500,
+                    "error": type(exc).__name__,
+                    "duration": round(perf_counter() - started, 6),
+                },
+            )
+            raise
+        finally:
+            clear_log_context(token)
 
     def principal_and_token(
         authorization: Optional[str] = Header(default=None),

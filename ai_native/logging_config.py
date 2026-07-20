@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 
+from ai_native.observability.logging import JsonFormatter
+
 
 def load_env_file(path: str = ".env") -> None:
     if not os.path.exists(path):
@@ -22,8 +24,6 @@ def configure_logging() -> None:
     load_env_file()
     level_name = os.getenv("AI_NATIVE_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-        force=True,
-    )
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    logging.basicConfig(level=level, handlers=[handler], force=True)

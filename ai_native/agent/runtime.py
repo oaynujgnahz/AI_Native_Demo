@@ -26,6 +26,7 @@ from ai_native.gateway.observer import Artifact, ExecutionResult, ObservationBui
 from ai_native.gateway.policy import PolicyDecision, PolicyEngine
 from ai_native.gateway.runtime_context import RuntimeContext
 from ai_native.gateway.tooling import ToolCatalog, build_enterprise_catalog
+from ai_native.observability import bind_log_context, clear_log_context
 
 
 RuntimeStatus = Literal[
@@ -123,8 +124,17 @@ class AgentRuntime:
         if trusted_year is not None:
             state["year"] = trusted_year
         config = _config(active_run_id)
-        result = self.graph.invoke(state, config=config, context=context)
-        return self._to_result(active_run_id, result)
+        token = bind_log_context(
+            run_id=active_run_id,
+            conversation_id=active_conversation_id,
+            user_id=context.principal.user_id,
+            company_id=trusted_company_id,
+        )
+        try:
+            result = self.graph.invoke(state, config=config, context=context)
+            return self._to_result(active_run_id, result)
+        finally:
+            clear_log_context(token)
 
     def resume(
         self,
@@ -134,17 +144,21 @@ class AgentRuntime:
         *,
         trusted_context: Mapping[str, Any] | None = None,
     ) -> AgentRuntimeResult:
-        result = self.graph.invoke(
-            Command(
-                resume={
-                    "message": user_input,
-                    "context": dict(trusted_context or {}),
-                }
-            ),
-            config=_config(run_id),
-            context=context,
-        )
-        return self._to_result(run_id, result)
+        token = bind_log_context(run_id=run_id, user_id=context.principal.user_id)
+        try:
+            result = self.graph.invoke(
+                Command(
+                    resume={
+                        "message": user_input,
+                        "context": dict(trusted_context or {}),
+                    }
+                ),
+                config=_config(run_id),
+                context=context,
+            )
+            return self._to_result(run_id, result)
+        finally:
+            clear_log_context(token)
 
     def _compile_graph(self):
         builder = StateGraph(AgentState, context_schema=RuntimeContext)
@@ -197,7 +211,7 @@ class AgentRuntime:
         state: AgentState,
         runtime: LangGraphRuntime[RuntimeContext],
     ) -> AgentState:
-        self._record("planner")
+        self._record("planner", state)
         preflight = _preflight_error(runtime.context)
         if preflight is not None:
             return _error_update(*preflight)
@@ -237,7 +251,7 @@ class AgentRuntime:
         state: AgentState,
         runtime: LangGraphRuntime[RuntimeContext],
     ) -> AgentState:
-        self._record("policy")
+        self._record("policy", state)
         action = _last_action(state)
         if action is None:
             return _error_update("model", "model_invalid_action")
@@ -268,7 +282,7 @@ class AgentRuntime:
         state: AgentState,
         runtime: LangGraphRuntime[RuntimeContext],
     ) -> AgentState:
-        self._record("executor")
+        self._record("executor", state)
         preflight = _preflight_error(runtime.context)
         if preflight is not None:
             return _error_update(*preflight)
@@ -328,7 +342,7 @@ class AgentRuntime:
         state: AgentState,
         runtime: LangGraphRuntime[RuntimeContext],
     ) -> AgentState:
-        self._record("observer")
+        self._record("observer", state)
         preflight = _preflight_error(runtime.context)
         if preflight is not None:
             return _error_update(*preflight)
@@ -368,7 +382,7 @@ class AgentRuntime:
         runtime: LangGraphRuntime[RuntimeContext],
     ) -> AgentState:
         del runtime
-        self._record("clarifier")
+        self._record("clarifier", state)
         payload = {
             "run_id": state.get("run_id", ""),
             "question": state.get("pending_question", ""),
@@ -415,7 +429,7 @@ class AgentRuntime:
         state: AgentState,
         runtime: LangGraphRuntime[RuntimeContext],
     ) -> AgentState:
-        self._record("responder")
+        self._record("responder", state)
         run_id = state.get("run_id", "")
         action = _last_action(state)
         requested = list(action.artifact_ids) if action is not None else []
@@ -490,7 +504,7 @@ class AgentRuntime:
         runtime: LangGraphRuntime[RuntimeContext],
     ) -> AgentState:
         del runtime
-        self._record("terminal_error")
+        self._record("terminal_error", state)
         run_id = state.get("run_id", "")
         code = state.get("error_code", "agent_error")
         category = state.get("error_category", "error")
@@ -578,7 +592,14 @@ class AgentRuntime:
             error_code="runtime_result_missing",
         )
 
-    def _record(self, node: str) -> None:
+    def _record(self, node: str, state: Mapping[str, Any]) -> None:
+        bind_log_context(
+            run_id=state.get("run_id"),
+            conversation_id=state.get("conversation_id"),
+            user_id=state.get("user_id"),
+            company_id=state.get("company_id"),
+            graph_node=node,
+        )
         if self._on_node is not None:
             self._on_node(node)
 

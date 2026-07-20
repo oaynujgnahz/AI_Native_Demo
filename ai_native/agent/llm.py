@@ -118,7 +118,10 @@ class OpenAIToolPlanner:
         tool_calls = getattr(message, "tool_calls", None) or []
         if not tool_calls:
             content = getattr(message, "content", None)
-            logger.info("LLM planning response: direct_answer=%r", content)
+            logger.info(
+                "LLM planning response: direct_answer_received=%s",
+                bool(content),
+            )
             return ToolCallDecision(direct_answer=content)
 
         function = tool_calls[0].function
@@ -127,14 +130,13 @@ class OpenAIToolPlanner:
         except json.JSONDecodeError:
             arguments = {}
             logger.warning(
-                "LLM returned invalid tool arguments: tool=%s raw_arguments=%r",
+                "LLM returned invalid tool arguments: tool=%s",
                 function.name,
-                function.arguments,
             )
         logger.info(
-            "LLM planning response: tool=%s arguments=%s",
+            "LLM planning response: tool=%s arguments_received=%s",
             function.name,
-            arguments,
+            bool(arguments),
         )
         return ToolCallDecision(tool_name=function.name, arguments=arguments)
 
@@ -179,8 +181,8 @@ class OpenAIToolPlanner:
         except json.JSONDecodeError:
             arguments = {}
         logger.info(
-            "LLM forced planning response: tool=%s arguments=%s",
+            "LLM forced planning response: tool=%s arguments_received=%s",
             function.name,
-            arguments,
+            bool(arguments),
         )
         return ToolCallDecision(tool_name=function.name, arguments=arguments)
