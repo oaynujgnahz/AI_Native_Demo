@@ -41,7 +41,13 @@ from ai_native.gateway.errors import GatewayAgentError
 from ai_native.gateway.runtime_context import RuntimeContext
 from ai_native.gateway.tooling import ToolCatalog, build_enterprise_catalog
 from ai_native.logging_config import configure_logging
-from ai_native.observability import bind_log_context, clear_log_context
+from ai_native.observability import (
+    agent_span,
+    bind_log_context,
+    clear_log_context,
+    configure_tracing,
+    current_trace_context,
+)
 
 load_dotenv()
 
@@ -189,8 +195,14 @@ def create_app(
 
     @app.middleware("http")
     async def request_log_context(request: Request, call_next):
-        trace_id = request.headers.get("X-Request-ID") or str(uuid4())
-        token = bind_log_context(trace_id=trace_id, endpoint=request.url.path)
+        request_id = request.headers.get("X-Request-ID") or str(uuid4())
+        trace_context = current_trace_context()
+        token = bind_log_context(
+            request_id=request_id,
+            trace_id=trace_context.get("trace_id", request_id),
+            span_id=trace_context.get("span_id"),
+            endpoint=request.url.path,
+        )
         started = perf_counter()
         try:
             response = await call_next(request)
@@ -618,6 +630,7 @@ def create_app(
         conversation_repository.delete_conversation(conversation_id)
         return Response(status_code=204)
 
+    configure_tracing(app, "cmpf-agent-gateway")
     return app
 
 
@@ -750,9 +763,26 @@ def _require_allowed_company(
 
 
 def _checkpoint_state(runtime: Any, run_id: str) -> Mapping[str, Any]:
-    snapshot = runtime.graph.get_state(
-        {"configurable": {"thread_id": run_id}}
-    )
+    started = perf_counter()
+    with agent_span(
+        "agent.checkpoint",
+        {"run_id": run_id, "operation": "get_state"},
+    ) as span:
+        try:
+            snapshot = runtime.graph.get_state(
+                {"configurable": {"thread_id": run_id}}
+            )
+        except Exception as exc:
+            span.set_attributes(
+                {"status": "error", "error": type(exc).__name__}
+            )
+            raise
+        else:
+            span.set_attribute("status", "ok")
+        finally:
+            span.set_attribute(
+                "duration_ms", (perf_counter() - started) * 1000
+            )
     values = getattr(snapshot, "values", None)
     if not isinstance(values, Mapping) or not values:
         raise GatewayAgentError(
@@ -797,7 +827,7 @@ def _result_tool_name(
 
 def _streaming_response(events: Any, run_id: str) -> StreamingResponse:
     return StreamingResponse(
-        events,
+        _traced_sse_events(events, run_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -806,6 +836,33 @@ def _streaming_response(events: Any, run_id: str) -> StreamingResponse:
             "Access-Control-Expose-Headers": "X-Agent-Run-Id",
         },
     )
+
+
+def _traced_sse_events(events: Any, run_id: str):
+    started = perf_counter()
+    event_count = 0
+    with agent_span(
+        "agent.sse",
+        {"run_id": run_id, "operation": "stream"},
+    ) as span:
+        try:
+            for event in events:
+                event_count += 1
+                yield event
+        except Exception as exc:
+            span.set_attributes(
+                {"status": "error", "error": type(exc).__name__}
+            )
+            raise
+        else:
+            span.set_attribute("status", "ok")
+        finally:
+            span.set_attributes(
+                {
+                    "duration_ms": (perf_counter() - started) * 1000,
+                    "event_count": event_count,
+                }
+            )
 
 
 def _raise_for_runtime_result(result: AgentRuntimeResult) -> None:

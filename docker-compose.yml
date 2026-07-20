@@ -15,5 +15,14 @@ services:
     volumes:
       - cmpf_agent_postgres:/var/lib/postgresql/data
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "4318:4318"
+      - "16686:16686"
+
 volumes:
   cmpf_agent_postgres:

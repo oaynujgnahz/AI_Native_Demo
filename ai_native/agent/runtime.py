@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import RLock
+from time import perf_counter
 from typing import Any, Callable, Literal, Mapping, Sequence
 from uuid import uuid4
 
@@ -26,7 +27,7 @@ from ai_native.gateway.observer import Artifact, ExecutionResult, ObservationBui
 from ai_native.gateway.policy import PolicyDecision, PolicyEngine
 from ai_native.gateway.runtime_context import RuntimeContext
 from ai_native.gateway.tooling import ToolCatalog, build_enterprise_catalog
-from ai_native.observability import bind_log_context, clear_log_context
+from ai_native.observability import agent_span, bind_log_context, clear_log_context
 
 
 RuntimeStatus = Literal[
@@ -131,8 +132,39 @@ class AgentRuntime:
             company_id=trusted_company_id,
         )
         try:
-            result = self.graph.invoke(state, config=config, context=context)
-            return self._to_result(active_run_id, result)
+            attributes = {
+                "run_id": active_run_id,
+                "conversation_id": active_conversation_id,
+                "user_id": context.principal.user_id,
+                "company_id": trusted_company_id,
+                "resumed": False,
+            }
+            started = perf_counter()
+            with agent_span("agent.graph", attributes) as graph_span:
+                try:
+                    with agent_span(
+                        "agent.checkpoint",
+                        {**attributes, "operation": "graph_invoke"},
+                    ) as checkpoint_span:
+                        result = self.graph.invoke(
+                            state, config=config, context=context
+                        )
+                        checkpoint_span.set_attribute("status", "ok")
+                    runtime_result = self._to_result(active_run_id, result)
+                    graph_span.set_attribute("status", runtime_result.status)
+                    graph_span.set_attribute(
+                        "artifact_count", len(runtime_result.artifact_ids)
+                    )
+                    return runtime_result
+                except Exception as exc:
+                    graph_span.set_attributes(
+                        {"status": "error", "error": type(exc).__name__}
+                    )
+                    raise
+                finally:
+                    graph_span.set_attribute(
+                        "duration_ms", (perf_counter() - started) * 1000
+                    )
         finally:
             clear_log_context(token)
 
@@ -146,29 +178,68 @@ class AgentRuntime:
     ) -> AgentRuntimeResult:
         token = bind_log_context(run_id=run_id, user_id=context.principal.user_id)
         try:
-            result = self.graph.invoke(
-                Command(
-                    resume={
-                        "message": user_input,
-                        "context": dict(trusted_context or {}),
-                    }
-                ),
-                config=_config(run_id),
-                context=context,
-            )
-            return self._to_result(run_id, result)
+            attributes = {
+                "run_id": run_id,
+                "user_id": context.principal.user_id,
+                "company_id": context.principal.company_id,
+                "resumed": True,
+            }
+            started = perf_counter()
+            with agent_span("agent.graph", attributes) as graph_span:
+                try:
+                    with agent_span(
+                        "agent.checkpoint",
+                        {**attributes, "operation": "graph_resume"},
+                    ) as checkpoint_span:
+                        result = self.graph.invoke(
+                            Command(
+                                resume={
+                                    "message": user_input,
+                                    "context": dict(trusted_context or {}),
+                                }
+                            ),
+                            config=_config(run_id),
+                            context=context,
+                        )
+                        checkpoint_span.set_attribute("status", "ok")
+                    runtime_result = self._to_result(run_id, result)
+                    graph_span.set_attribute("status", runtime_result.status)
+                    graph_span.set_attribute(
+                        "artifact_count", len(runtime_result.artifact_ids)
+                    )
+                    return runtime_result
+                except Exception as exc:
+                    graph_span.set_attributes(
+                        {"status": "error", "error": type(exc).__name__}
+                    )
+                    raise
+                finally:
+                    graph_span.set_attribute(
+                        "duration_ms", (perf_counter() - started) * 1000
+                    )
         finally:
             clear_log_context(token)
 
     def _compile_graph(self):
         builder = StateGraph(AgentState, context_schema=RuntimeContext)
-        builder.add_node("planner", self._planner_node)
-        builder.add_node("policy", self._policy_node)
-        builder.add_node("executor", self._executor_node)
-        builder.add_node("observer", self._observer_node)
-        builder.add_node("clarifier", self._clarifier_node)
-        builder.add_node("responder", self._responder_node)
-        builder.add_node("terminal_error", self._terminal_error_node)
+        builder.add_node("planner", self._traced_node("planner", self._planner_node))
+        builder.add_node("policy", self._traced_node("policy", self._policy_node))
+        builder.add_node(
+            "executor", self._traced_node("executor", self._executor_node)
+        )
+        builder.add_node(
+            "observer", self._traced_node("observer", self._observer_node)
+        )
+        builder.add_node(
+            "clarifier", self._traced_node("clarifier", self._clarifier_node)
+        )
+        builder.add_node(
+            "responder", self._traced_node("responder", self._responder_node)
+        )
+        builder.add_node(
+            "terminal_error",
+            self._traced_node("terminal_error", self._terminal_error_node),
+        )
 
         builder.add_edge(START, "planner")
         builder.add_conditional_edges(
@@ -205,6 +276,61 @@ class AgentRuntime:
         builder.add_edge("responder", END)
         builder.add_edge("terminal_error", END)
         return builder.compile(checkpointer=self.checkpointer)
+
+    def _traced_node(
+        self,
+        node: str,
+        handler: Callable[..., AgentState],
+    ) -> Callable[..., AgentState]:
+        def traced(
+            state: AgentState,
+            runtime: LangGraphRuntime[RuntimeContext],
+        ) -> AgentState:
+            action = _last_action(state)
+            attributes: dict[str, Any] = {
+                "run_id": state.get("run_id"),
+                "conversation_id": state.get("conversation_id"),
+                "user_id": state.get("user_id"),
+                "company_id": state.get("company_id"),
+                "node": node,
+                "action_count": len(state.get("actions", [])),
+                "observation_count": len(state.get("observations", [])),
+                "artifact_count": len(state.get("artifact_ids", [])),
+            }
+            tool_name = state.get("approved_tool_name")
+            if tool_name is None and action is not None:
+                tool_name = action.tool_name
+            if tool_name is not None:
+                attributes["tool"] = str(tool_name)
+            started = perf_counter()
+            with agent_span(f"agent.{node}", attributes) as span:
+                try:
+                    update = handler(state, runtime)
+                except Exception as exc:
+                    span.set_attributes(
+                        {"status": "error", "error": type(exc).__name__}
+                    )
+                    raise
+                else:
+                    error_code = update.get("error_code")
+                    span.set_attributes(
+                        {
+                            "status": "error" if error_code else "ok",
+                            "error": error_code,
+                            "action_count": len(update.get("actions", [])),
+                            "observation_count": len(
+                                update.get("observations", [])
+                            ),
+                            "artifact_count": len(update.get("artifact_ids", [])),
+                        }
+                    )
+                    return update
+                finally:
+                    span.set_attribute(
+                        "duration_ms", (perf_counter() - started) * 1000
+                    )
+
+        return traced
 
     def _planner_node(
         self,
@@ -298,18 +424,46 @@ class AgentRuntime:
         if decision.tool_name is None:
             return _error_update("policy", "approval_invalid")
         try:
-            result = self.executor.execute(
-                tool_name=decision.tool_name,
-                arguments=decision.validated_arguments,
-                principal=runtime.context.principal,
-                bearer_token=runtime.context.bearer_token,
-                message=state.get("goal", ""),
-                context={
+            tool_started = perf_counter()
+            with agent_span(
+                "agent.tool",
+                {
+                    "run_id": state.get("run_id"),
+                    "conversation_id": state.get("conversation_id"),
                     "company_id": state.get("company_id"),
-                    "year": state.get("year"),
-                    "locale": state.get("locale"),
+                    "tool": decision.tool_name,
                 },
-            )
+            ) as tool_span:
+                try:
+                    result = self.executor.execute(
+                        tool_name=decision.tool_name,
+                        arguments=decision.validated_arguments,
+                        principal=runtime.context.principal,
+                        bearer_token=runtime.context.bearer_token,
+                        message=state.get("goal", ""),
+                        context={
+                            "company_id": state.get("company_id"),
+                            "year": state.get("year"),
+                            "locale": state.get("locale"),
+                        },
+                    )
+                except Exception as exc:
+                    tool_span.set_attributes(
+                        {"status": "error", "error": type(exc).__name__}
+                    )
+                    raise
+                else:
+                    tool_span.set_attributes(
+                        {
+                            "endpoint": result.endpoint,
+                            "result_count": result.result_count,
+                            "status": "ok",
+                        }
+                    )
+                finally:
+                    tool_span.set_attribute(
+                        "duration_ms", (perf_counter() - tool_started) * 1000
+                    )
         except RequestValidationError as exc:
             update = _error_update("validation", exc.code)
             if exc.candidates:
