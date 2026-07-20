@@ -115,7 +115,7 @@ class EnterpriseAgentService:
         return AgentResponse(
             answer=execution.answer,
             tool_name=tool_name,
-            chart=execution.artifact,
+            chart=execution.chart,
         )
 
     def _plan(

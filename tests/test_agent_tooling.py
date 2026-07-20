@@ -227,3 +227,28 @@ class EnterpriseToolExecutorTest(unittest.TestCase):
         self.assertEqual(result.result_count, 1)
         self.assertIn("Company 100", result.answer)
         self.assertNotIn("sentinel-secret", json.dumps(result.as_safe_dict()))
+
+
+class ObservationSafetyTest(unittest.TestCase):
+    def test_chart_values_stay_in_artifact(self):
+        from ai_native.gateway.observer import (
+            Artifact,
+            ExecutionResult,
+            ObservationBuilder,
+        )
+
+        result = ExecutionResult(
+            tool_name="get_base_detail_monthly_chart",
+            endpoint="/analysis/baseMonthEmission",
+            safe_facts={"base_id": "10185", "base_name": "親社拠点2"},
+            artifact=Artifact(
+                "artifact-1", "chart", {"series": [{"values": [132360.075]}]}
+            ),
+            result_count=12,
+        )
+
+        observation = ObservationBuilder().from_result(result)
+
+        encoded = json.dumps(observation.model_dump(), ensure_ascii=False)
+        self.assertIn("10185", encoded)
+        self.assertNotIn("132360.075", encoded)

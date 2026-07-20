@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping
+from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -12,33 +13,8 @@ from ai_native.gateway.base_resolver import (
     BaseResolutionError,
 )
 from ai_native.gateway.charts import ChartSpec
+from ai_native.gateway.observer import Artifact, ExecutionResult
 from ai_native.gateway.tooling import ToolCatalog, build_enterprise_catalog
-
-
-@dataclass(frozen=True)
-class ExecutionResult:
-    tool_name: str
-    endpoint: str
-    safe_facts: dict[str, Any]
-    artifact: ChartSpec | None
-    result_count: int
-    answer: str
-    audit_details: dict[str, Any] = field(default_factory=dict, repr=False)
-
-    def as_safe_dict(self) -> dict[str, Any]:
-        artifact = None
-        if self.artifact is not None:
-            artifact = {
-                "id": self.artifact.chart_id,
-                "kind": "chart",
-            }
-        return {
-            "tool_name": self.tool_name,
-            "endpoint": self.endpoint,
-            "safe_facts": dict(self.safe_facts),
-            "artifact": artifact,
-            "result_count": self.result_count,
-        }
 
 
 @dataclass
@@ -146,13 +122,13 @@ class EnterpriseToolExecutor:
         count = handled.result_count
         if count is None:
             count = len(handled.artifact.categories) if handled.artifact else 1
+        artifact = self._artifact_from_handler(handled)
         return ExecutionResult(
             tool_name=tool_name,
             endpoint=definition.endpoint,
             safe_facts=safe_facts,
-            artifact=handled.artifact,
+            artifact=artifact,
             result_count=count,
-            answer=handled.answer,
             audit_details=handled.audit_details,
         )
 
@@ -182,8 +158,8 @@ class EnterpriseToolExecutor:
                 bases, execution.company_name or execution.company_id, execution.locale
             ),
             safe_facts={
-                "bases": [
-                    {"base_id": base.base_id, "base_name": base.name}
+                "candidates": [
+                    {"base_id": base.base_id, "name": base.name}
                     for base in bases
                 ]
             },
@@ -262,7 +238,7 @@ class EnterpriseToolExecutor:
         return _HandlerResult(
             answer=_chart_answer(chart, execution.locale),
             artifact=chart,
-            safe_facts={"scope": execution.scope},
+            safe_facts={"scope": str(execution.scope)},
         )
 
     def get_monthly_emission_trend_chart(
@@ -289,7 +265,9 @@ class EnterpriseToolExecutor:
             answer=_chart_answer(chart, execution.locale),
             artifact=chart,
             safe_facts=(
-                {"scope": execution.scope} if execution.scope is not None else {}
+                {"scope": str(execution.scope)}
+                if execution.scope is not None
+                else {}
             ),
         )
 
@@ -415,7 +393,6 @@ class EnterpriseToolExecutor:
         return _HandlerResult(
             answer=_chart_answer(chart, execution.locale),
             artifact=chart,
-            safe_facts={"group_by": group_by},
         )
 
     def get_base_monthly_emission_chart(
@@ -525,10 +502,7 @@ class EnterpriseToolExecutor:
             answer=_period_comparison_answer(chart, execution.locale),
             artifact=chart,
             safe_facts={
-                "period_start": first[0],
-                "period_end": first[1],
-                "comparison_period_start": second[0],
-                "comparison_period_end": second[1],
+                "period": f"{first[0]}-{first[1]};{second[0]}-{second[1]}",
             },
             audit_details={
                 "period_start": first[0],
@@ -559,13 +533,29 @@ class EnterpriseToolExecutor:
         from ai_native.gateway.service import _chart_answer
 
         base_facts = [
-            {"base_id": base.base_id, "base_name": base.name} for base in bases
+            {"base_id": base.base_id, "name": base.name} for base in bases
         ]
         return _HandlerResult(
             answer=_chart_answer(chart, locale),
             artifact=chart,
-            safe_facts={"bases": base_facts, **(safe_facts or {})},
+            safe_facts={"candidates": base_facts},
             audit_details={"base_ids": [base.base_id for base in bases]},
+        )
+
+    def _artifact_from_handler(self, handled: _HandlerResult) -> Artifact:
+        if handled.artifact is not None:
+            return Artifact(
+                id=handled.artifact.chart_id,
+                kind="chart",
+                payload={
+                    "chart": handled.artifact.model_dump(mode="json"),
+                    "answer": handled.answer,
+                },
+            )
+        return Artifact(
+            id=str(uuid4()),
+            kind="answer",
+            payload={"answer": handled.answer},
         )
 
     def _require_company_access(
