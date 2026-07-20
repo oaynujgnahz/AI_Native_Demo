@@ -11,6 +11,40 @@ from ai_native.gateway.registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 
+CMPF_ROUTING_GUIDANCE = (
+    "Understand natural Japanese, Chinese, and English. "
+    "Never invent a company ID, year, or Scope. Omit a missing argument "
+    "so the gateway can use trusted page context or ask for clarification. "
+    "Do not request write, delete, approval, export, or arbitrary tools. "
+    "Routing rules: "
+    "Use get_company_info ONLY for company metadata such as 会社の名称・住所, "
+    "公司名称/地址, company name/address; never use it for emissions. "
+    "Use get_annual_emission_summary for annual totals or 年間/年度/总量. "
+    "Use get_scope_breakdown for Scope breakdown, 内訳, 明细. "
+    "Use get_scope_composition_chart for composition/share/pie, 構成/割合/円グラフ/占比. "
+    "Use get_monthly_emission_trend_chart for 毎月/月別/月ごと/推移, "
+    "每月/月度/趋势, monthly/trend/line chart. "
+    "Use get_top_emission_activities_chart for 上位/最大/ランキング, "
+    "排名/最高, top/largest activities. "
+    "For 拠点/据点/site requests, use list_analysis_bases to list available sites "
+    "or resolve written site names in a controlled multi-step loop. "
+    "use get_base_detail_monthly_chart for one site's 月別/每月/monthly trend; "
+    "use get_base_detail_composition_chart for one site's 構成/占比/composition; "
+    "use get_base_emission_composition_chart for company-wide site/area composition; "
+    "use get_base_monthly_emission_chart for grouped site trends; "
+    "use compare_base_emissions_chart for comparing 2-5 sites. "
+    "Use compare_emission_periods_chart for 期間比較/期间比较/period comparison. "
+    "When the user asks to draw, show, visualize, or graph, prefer a chart tool. "
+)
+
+_LEGACY_SITE_ROUTING_GUIDANCE = (
+    "For the legacy one-shot path, use list_analysis_bases ONLY when the user asks "
+    "which sites exist, available sites, 拠点一覧, or 据点列表. "
+    "NEVER use list_analysis_bases for emissions, year, monthly, trend, or chart requests. "
+    "Pass site names as written; the gateway resolves and validates base IDs. "
+)
+
+
 @dataclass(frozen=True)
 class ToolCallDecision:
     tool_name: Optional[str] = None
@@ -70,32 +104,8 @@ class OpenAIToolPlanner:
                     "role": "system",
                     "content": (
                         "You are a CMPF carbon-emission business agent. "
-                        "Choose at most one tool when business data is needed. "
-                        "Understand natural Japanese, Chinese, and English. "
-                        "Never invent a company ID, year, or Scope. Omit a missing argument "
-                        "so the gateway can use trusted page context or ask for clarification. "
-                        "Do not request write, delete, approval, export, or arbitrary tools. "
-                        "Routing rules: "
-                        "Use get_company_info ONLY for company metadata such as 会社の名称・住所, "
-                        "公司名称/地址, company name/address; never use it for emissions. "
-                        "Use get_annual_emission_summary for annual totals or 年間/年度/总量. "
-                        "Use get_scope_breakdown for Scope breakdown, 内訳, 明细. "
-                        "Use get_scope_composition_chart for composition/share/pie, 構成/割合/円グラフ/占比. "
-                        "Use get_monthly_emission_trend_chart for 毎月/月別/月ごと/推移, "
-                        "每月/月度/趋势, monthly/trend/line chart. "
-                        "Use get_top_emission_activities_chart for 上位/最大/ランキング, "
-                        "排名/最高, top/largest activities. "
-                        "For 拠点/据点/site requests: use list_analysis_bases ONLY when the user "
-                        "asks which sites exist, available sites, 拠点一覧, or 据点列表. "
-                        "NEVER use list_analysis_bases for emissions, year, monthly, trend, or chart requests. "
-                        "use get_base_detail_monthly_chart for one site's 月別/每月/monthly trend; "
-                        "use get_base_detail_composition_chart for one site's 構成/占比/composition; "
-                        "use get_base_emission_composition_chart for company-wide site/area composition; "
-                        "use get_base_monthly_emission_chart for grouped site trends; "
-                        "use compare_base_emissions_chart for comparing 2-5 sites. "
-                        "Use compare_emission_periods_chart for 期間比較/期间比较/period comparison. "
-                        "Pass site names as written; the gateway resolves and validates base IDs. "
-                        "When the user asks to draw, show, visualize, or graph, prefer a chart tool. "
+                        f"{CMPF_ROUTING_GUIDANCE}"
+                        f"{_LEGACY_SITE_ROUTING_GUIDANCE}"
                         f"Trusted page defaults: {json.dumps(safe_context, ensure_ascii=False)}"
                     ),
                 },

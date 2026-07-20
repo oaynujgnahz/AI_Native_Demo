@@ -6,6 +6,40 @@ from typing import Any, get_args, get_type_hints
 from pydantic import BaseModel, ValidationError
 
 
+class RecordingOpenAIResponse:
+    def __init__(self, arguments=None, error=None, tool_name="submit_agent_action"):
+        self.arguments = arguments
+        self.error = error
+        self.tool_name = tool_name
+        self.last_request = None
+        self.chat = self.Chat(self)
+
+    class Chat:
+        def __init__(self, owner):
+            self.completions = RecordingOpenAIResponse.Completions(owner)
+
+    class Completions:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def create(self, **kwargs):
+            self.owner.last_request = kwargs
+            if self.owner.error is not None:
+                raise self.owner.error
+            function = type(
+                "Function",
+                (),
+                {
+                    "name": self.owner.tool_name,
+                    "arguments": self.owner.arguments,
+                },
+            )()
+            tool_call = type("ToolCall", (), {"function": function})()
+            message = type("Message", (), {"tool_calls": [tool_call]})()
+            choice = type("Choice", (), {"message": message})()
+            return type("Completion", (), {"choices": [choice]})()
+
+
 class AgentActionTest(unittest.TestCase):
     def test_call_tool_requires_a_name(self):
         from ai_native.agent.actions import AgentAction
@@ -128,3 +162,135 @@ class BudgetTest(unittest.TestCase):
         with self.assertRaises(BudgetExceeded) as exhausted:
             counters.consume_planner()
         self.assertEqual(exhausted.exception.code, "planner_budget_exhausted")
+
+
+class PlannerTest(unittest.TestCase):
+    def _plan(self, client, **overrides):
+        from ai_native.agent.planner import OpenAIActionPlanner
+
+        arguments = {
+            "goal": "2025年の年間排出量",
+            "trusted_context": {"company_id": "100", "year": 2025},
+            "observations": [],
+            "artifact_summaries": [],
+            "remaining": {"planner": 7, "tools": 6},
+            **overrides,
+        }
+        return OpenAIActionPlanner(client, "model").plan(**arguments)
+
+    def test_planner_returns_validated_action(self):
+        client = RecordingOpenAIResponse(
+            '{"kind":"call_tool","tool_name":"list_analysis_bases",'
+            '"arguments":{"company_id":"100"},"reason":"resolve site"}'
+        )
+
+        action = self._plan(
+            client,
+            goal="親社拠点2の月別排出量",
+            trusted_context={"company_id": "100"},
+        )
+
+        self.assertEqual(
+            (action.kind, action.tool_name),
+            ("call_tool", "list_analysis_bases"),
+        )
+        request = client.last_request
+        self.assertEqual(
+            request["tool_choice"],
+            {"type": "function", "function": {"name": "submit_agent_action"}},
+        )
+        self.assertEqual(
+            [tool["function"]["name"] for tool in request["tools"]],
+            ["submit_agent_action"],
+        )
+
+    def test_request_excludes_artifact_payload_and_token(self):
+        client = RecordingOpenAIResponse(
+            '{"kind":"finish","artifact_ids":["a1"]}'
+        )
+
+        self._plan(
+            client,
+            goal="show result",
+            trusted_context={
+                "company_id": "100",
+                "locale": "ja",
+                "Authorization": "Bearer sentinel-secret",
+            },
+            artifact_summaries=[
+                {
+                    "id": "a1",
+                    "kind": "chart",
+                    "payload": {"series": [{"values": [132360.075]}]},
+                }
+            ],
+        )
+
+        encoded = json.dumps(client.last_request)
+        self.assertNotIn("values", encoded)
+        self.assertNotIn("132360.075", encoded)
+        self.assertNotIn("Bearer", encoded)
+        self.assertNotIn("sentinel-secret", encoded)
+
+    def test_invalid_action_is_a_retryable_model_error(self):
+        from ai_native.gateway.errors import GatewayAgentError
+
+        for raw in (
+            "not-json",
+            '{"kind":"call_tool","tool_name":"x","token":"secret"}',
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(GatewayAgentError) as raised:
+                    self._plan(RecordingOpenAIResponse(raw))
+                self.assertEqual(raised.exception.category, "model")
+                self.assertEqual(raised.exception.code, "model_invalid_action")
+                self.assertTrue(raised.exception.retryable)
+
+    def test_provider_failure_falls_back_only_for_single_final_tool(self):
+        from ai_native.gateway.errors import GatewayAgentError
+
+        annual = self._plan(
+            RecordingOpenAIResponse(error=RuntimeError("provider down"))
+        )
+        self.assertEqual(annual.kind, "call_tool")
+        self.assertEqual(annual.tool_name, "get_annual_emission_summary")
+        self.assertEqual(
+            annual.arguments,
+            {"company_id": "100", "year": 2025},
+        )
+
+        for goal in (
+            "親社拠点2の月別排出量",
+            "東京拠点と大阪拠点を比較",
+            "2024年と2025年を比較",
+        ):
+            with self.subTest(goal=goal):
+                with self.assertRaises(GatewayAgentError) as raised:
+                    self._plan(
+                        RecordingOpenAIResponse(error=RuntimeError("provider down")),
+                        goal=goal,
+                    )
+                self.assertEqual(raised.exception.category, "model")
+                self.assertEqual(raised.exception.code, "model_unavailable")
+                self.assertTrue(raised.exception.retryable)
+
+    def test_provider_failure_never_falls_back_during_replan(self):
+        from ai_native.agent.actions import SafeObservation
+        from ai_native.gateway.errors import GatewayAgentError
+
+        with self.assertRaises(GatewayAgentError) as raised:
+            self._plan(
+                RecordingOpenAIResponse(error=RuntimeError("provider down")),
+                observations=[
+                    SafeObservation(
+                        tool_name="get_annual_emission_summary",
+                        status="success",
+                        facts={"company_id": "100", "year": 2025},
+                        artifact_id="a1",
+                        result_count=1,
+                    )
+                ],
+                artifact_summaries=[{"id": "a1", "kind": "summary"}],
+            )
+
+        self.assertEqual(raised.exception.code, "model_unavailable")
