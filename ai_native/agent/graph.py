@@ -7,7 +7,7 @@ from typing import Any, Dict, Literal, Optional
 from langchain_core.messages import AIMessage, BaseMessage
 from langgraph.graph import END, START, StateGraph
 
-from ai_native.agent.state import AgentState
+from ai_native.agent.state import LegacyAgentState
 from ai_native.agent.llm import OpenAIToolPlanner
 from ai_native.gateway.cmpf_client import CmpfGateway
 from ai_native.gateway.context import BusinessContext
@@ -32,7 +32,7 @@ def build_graph(
         type(tool_planner).__name__ if tool_planner else "rule-fallback",
     )
 
-    graph_builder = StateGraph(AgentState)
+    graph_builder = StateGraph(LegacyAgentState)
     graph_builder.add_node("plan", _build_plan_node(registry, tool_planner))
     graph_builder.add_node("business_tool", _build_tool_node(registry))
     graph_builder.add_node("answer", _answer)
@@ -52,7 +52,7 @@ def build_graph(
 
 
 def _build_plan_node(registry: ToolRegistry, planner: Optional[Any]):
-    def plan_node(state: AgentState) -> Dict[str, Any]:
+    def plan_node(state: LegacyAgentState) -> Dict[str, Any]:
         user_text = _last_user_text(state)
         year = state.get("year") or _extract_year(user_text)
         company_id = state.get("company_id") or _extract_company_id(user_text)
@@ -118,14 +118,14 @@ def _build_plan_node(registry: ToolRegistry, planner: Optional[Any]):
     return plan_node
 
 
-def _route_after_plan(state: AgentState) -> Literal["tool", "answer"]:
+def _route_after_plan(state: LegacyAgentState) -> Literal["tool", "answer"]:
     if state.get("intent") == "tool":
         return "tool"
     return "answer"
 
 
 def _build_tool_node(registry: ToolRegistry):
-    def tool_node(state: AgentState) -> Dict[str, Any]:
+    def tool_node(state: LegacyAgentState) -> Dict[str, Any]:
         tool_name = state.get("tool_name") or "get_emission_dashboard"
         company_id = state.get("company_id") or "cmpf-demo"
         context = BusinessContext(
@@ -155,7 +155,7 @@ def _build_tool_node(registry: ToolRegistry):
     return tool_node
 
 
-def _answer(state: AgentState) -> Dict[str, Any]:
+def _answer(state: LegacyAgentState) -> Dict[str, Any]:
     tool_name = state.get("tool_name") or "get_emission_dashboard"
     result = state.get("tool_results", {}).get(tool_name)
     if result:
@@ -248,7 +248,7 @@ def _format_company_info_answer(result: Dict[str, Any]) -> str:
         )
     return "\n".join(lines)
 
-def _last_user_text(state: AgentState) -> str:
+def _last_user_text(state: LegacyAgentState) -> str:
     for message in reversed(state.get("messages", [])):
         if isinstance(message, BaseMessage):
             if message.type == "human":

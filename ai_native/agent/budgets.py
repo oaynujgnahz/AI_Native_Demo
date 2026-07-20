@@ -1,4 +1,7 @@
+import hashlib
+import json
 from dataclasses import dataclass, field
+from typing import Mapping
 
 from ai_native.gateway.errors import GatewayAgentError
 
@@ -6,6 +9,17 @@ from ai_native.gateway.errors import GatewayAgentError
 class BudgetExceeded(GatewayAgentError):
     def __init__(self, code: str) -> None:
         super().__init__(category="budget", code=code)
+
+
+def canonical_tool_signature(tool_name: str, arguments: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        {"tool_name": tool_name, "arguments": arguments},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
