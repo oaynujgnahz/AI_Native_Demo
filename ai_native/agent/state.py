@@ -23,6 +23,7 @@ class AgentState(TypedDict):
     actions: NotRequired[List[AgentAction]]
     observations: NotRequired[List[SafeObservation]]
     artifact_ids: NotRequired[List[str]]
+    pending_result_id: NotRequired[str]
     counters: NotRequired[RunCounters]
     policy_status: NotRequired[
         Literal["approved", "clarification_required", "denied"]

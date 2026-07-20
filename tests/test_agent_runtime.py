@@ -394,6 +394,8 @@ class AgentRuntimeTest(unittest.TestCase):
         self.assertNotIn("runtimecontext", lowered)
         self.assertNotIn("bearer_token", lowered)
         self.assertNotIn("authorization", lowered)
+        self.assertNotIn("cookie", lowered)
+        self.assertNotIn("raw_payload", lowered)
         self.assertIn("sentinel-never-checkpoint", executor.calls[0]["bearer_token"])
 
     def test_graph_exposes_only_the_stable_runtime_node_names(self):

@@ -7,7 +7,6 @@ from threading import RLock
 from typing import Any, Callable, Literal, Mapping, Sequence
 from uuid import uuid4
 
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime as LangGraphRuntime
 from langgraph.types import Command, interrupt
@@ -293,9 +292,20 @@ class AgentRuntime:
         except Exception:
             return _error_update("upstream", "executor_error")
         run_id = state.get("run_id", "")
+        result_id = str(uuid4())
+        save_execution_result = getattr(
+            runtime.context.repository, "save_execution_result", None
+        )
+        if callable(save_execution_result):
+            try:
+                result_id = str(save_execution_result(run_id, result))
+            except GatewayAgentError as exc:
+                return _error_update(exc.category, exc.code)
+            except Exception:
+                return _error_update("persistence", "execution_result_store_failed")
         with self._lock:
-            self._pending_results[run_id] = result
-        return {}
+            self._pending_results[result_id] = result
+        return {"pending_result_id": result_id}
 
     def _observer_node(
         self,
@@ -307,8 +317,17 @@ class AgentRuntime:
         if preflight is not None:
             return _error_update(*preflight)
         run_id = state.get("run_id", "")
+        result_id = state.get("pending_result_id", "")
         with self._lock:
-            result = self._pending_results.pop(run_id, None)
+            result = self._pending_results.pop(result_id, None)
+        if result is None:
+            get_execution_result = getattr(
+                runtime.context.repository, "get_execution_result", None
+            )
+            if callable(get_execution_result):
+                stored = get_execution_result(run_id, result_id)
+                if stored is not None:
+                    result = _restore_execution_result(stored)
         if result is None:
             return _error_update("upstream", "execution_result_missing")
         try:
@@ -324,6 +343,7 @@ class AgentRuntime:
         return {
             "observations": [*state.get("observations", []), observation],
             "artifact_ids": artifact_ids,
+            "pending_result_id": "",
         }
 
     def _clarifier_node(
@@ -359,7 +379,6 @@ class AgentRuntime:
         state: AgentState,
         runtime: LangGraphRuntime[RuntimeContext],
     ) -> AgentState:
-        del runtime
         self._record("responder")
         run_id = state.get("run_id", "")
         action = _last_action(state)
@@ -383,8 +402,22 @@ class AgentRuntime:
             with self._lock:
                 self._responses[run_id] = result
             return _error_update("validation", "artifact_not_found")
-        with self._lock:
-            artifacts = [self._artifacts.get((run_id, item)) for item in requested]
+        artifacts: list[Artifact | None] = []
+        get_artifact = getattr(runtime.context.repository, "get_artifact", None)
+        for artifact_id in requested:
+            with self._lock:
+                artifact = self._artifacts.get((run_id, artifact_id))
+            if artifact is None and callable(get_artifact):
+                stored = get_artifact(run_id, artifact_id)
+                if stored is not None:
+                    artifact = Artifact(
+                        id=stored.artifact_id,
+                        kind=stored.artifact_kind,
+                        payload=dict(stored.artifact_payload),
+                    )
+                    with self._lock:
+                        self._artifacts[(run_id, artifact_id)] = artifact
+            artifacts.append(artifact)
         if any(item is None for item in artifacts):
             result = AgentRuntimeResult(
                 run_id=run_id,
@@ -542,13 +575,34 @@ def build_agent_runtime(
         executor=selected_executor,
         observer=observer or ObservationBuilder(),
         budgets=budgets or AgentBudgets(),
-        checkpointer=checkpointer or InMemorySaver(),
+        checkpointer=checkpointer or _build_default_checkpointer(),
         on_node=on_node,
     )
 
 
 def _config(run_id: str) -> dict[str, dict[str, str]]:
     return {"configurable": {"thread_id": run_id}}
+
+
+def _build_default_checkpointer() -> Any:
+    from ai_native.gateway.checkpointer import build_checkpointer_from_env
+
+    return build_checkpointer_from_env()
+
+
+def _restore_execution_result(stored: Any) -> ExecutionResult:
+    return ExecutionResult(
+        tool_name=str(stored.tool_name),
+        endpoint=str(stored.endpoint),
+        safe_facts=dict(stored.safe_facts),
+        artifact=Artifact(
+            id=str(stored.artifact_id),
+            kind=str(stored.artifact_kind),
+            payload=dict(stored.artifact_payload),
+        ),
+        result_count=int(stored.result_count),
+        audit_details=dict(stored.audit_details),
+    )
 
 
 def _year_from_goal(goal: str) -> int | None:
