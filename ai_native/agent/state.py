@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Dict, List, Optional
+from typing import List, Literal, Optional
 
 from typing_extensions import NotRequired, TypedDict
-
-from langgraph.graph.message import add_messages
 
 from ai_native.agent.actions import AgentAction, SafeObservation
 from ai_native.agent.budgets import RunCounters
@@ -26,24 +24,15 @@ class AgentState(TypedDict):
     observations: NotRequired[List[SafeObservation]]
     artifact_ids: NotRequired[List[str]]
     counters: NotRequired[RunCounters]
+    policy_status: NotRequired[
+        Literal["approved", "clarification_required", "denied"]
+    ]
+    approval_id: NotRequired[Optional[str]]
+    approved_tool_name: NotRequired[Optional[str]]
+    approved_arguments_json: NotRequired[str]
+    approval_signature: NotRequired[Optional[str]]
     pending_question: NotRequired[str]
     missing_fields: NotRequired[List[str]]
     stop_reason: NotRequired[str]
     error_code: NotRequired[str]
-
-
-class LegacyAgentState(TypedDict):
-    """Non-checkpointed state for the one-shot graph; removed in Task 6."""
-
-    messages: Annotated[List[Any], add_messages]
-    company_id: NotRequired[Optional[str]]
-    year: NotRequired[Optional[int]]
-    intent: NotRequired[Optional[str]]
-    tool_name: NotRequired[Optional[str]]
-    tool_arguments: NotRequired[Dict[str, Any]]
-    tool_results: NotRequired[Dict[str, Any]]
-    direct_answer: NotRequired[Optional[str]]
-    permissions: NotRequired[List[str]]
-    user_id: NotRequired[str]
-    tenant_id: NotRequired[str]
-    auth_token: NotRequired[Optional[str]]
+    error_category: NotRequired[str]

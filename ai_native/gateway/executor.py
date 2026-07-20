@@ -13,6 +13,32 @@ from ai_native.gateway.base_resolver import (
     BaseResolutionError,
 )
 from ai_native.gateway.charts import ChartSpec
+from ai_native.gateway.errors import CompanyForbiddenError, RequestValidationError
+from ai_native.gateway.execution_support import (
+    base_comparison_chart as _base_comparison_chart,
+    base_detail_composition_chart as _base_detail_composition_chart,
+    base_detail_monthly_chart as _base_detail_monthly_chart,
+    base_group_composition_chart as _base_group_composition_chart,
+    base_group_monthly_chart as _base_group_monthly_chart,
+    base_list_answer as _base_list_answer,
+    body as _body,
+    breakdown_answer as _breakdown_answer,
+    chart_answer as _chart_answer,
+    company_answer as _company_answer,
+    composition_chart as _composition_chart,
+    fiscal_months as _fiscal_months,
+    group_by as _group_by,
+    locale as _locale,
+    monthly_chart as _monthly_chart,
+    period_comparison_answer as _period_comparison_answer,
+    period_comparison_chart as _period_comparison_chart,
+    period_comparison_payload as _period_comparison_payload,
+    scope_value as _scope_value,
+    summary_answer as _summary_answer,
+    top_chart as _top_chart,
+    validated_period as _validated_period,
+    year as _year,
+)
 from ai_native.gateway.observer import Artifact, ExecutionResult
 from ai_native.gateway.tooling import ToolCatalog, build_enterprise_catalog
 
@@ -32,8 +58,6 @@ class _ExecutionContext:
     preparation_steps: int = 0
 
     def step(self) -> None:
-        from ai_native.gateway.service import RequestValidationError
-
         self.preparation_steps += 1
         if self.preparation_steps > 3:
             raise RequestValidationError("tool_loop_limit")
@@ -70,13 +94,6 @@ class EnterpriseToolExecutor:
         message: str,
         context: Mapping[str, Any],
     ) -> ExecutionResult:
-        from ai_native.gateway.service import (
-            RequestValidationError,
-            _locale,
-            _scope_value,
-            _year,
-        )
-
         definition = self.catalog.get(tool_name)
         try:
             validated = definition.argument_model.model_validate(arguments)
@@ -135,8 +152,6 @@ class EnterpriseToolExecutor:
     def get_company_info(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import _company_answer
-
         data = self.gateway.get_company_info(
             execution.company_id, auth_token=execution.bearer_token
         )
@@ -149,8 +164,6 @@ class EnterpriseToolExecutor:
     def list_analysis_bases(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import _base_list_answer
-
         payload = self._bases_payload_cached(execution)
         bases = self.base_resolver.list(payload, company_id=execution.company_id)
         return _HandlerResult(
@@ -169,8 +182,6 @@ class EnterpriseToolExecutor:
     def get_annual_emission_summary(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import _summary_answer
-
         start_month = self._company_start_month_cached(execution)
         data = self.gateway.get_dashboard_summary(
             execution.company_id,
@@ -190,8 +201,6 @@ class EnterpriseToolExecutor:
     def get_scope_breakdown(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import _breakdown_answer
-
         start_month = self._company_start_month_cached(execution)
         data = self.gateway.get_scope_breakdown(
             execution.company_id,
@@ -211,12 +220,6 @@ class EnterpriseToolExecutor:
     def get_scope_composition_chart(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import (
-            RequestValidationError,
-            _chart_answer,
-            _composition_chart,
-        )
-
         if execution.scope is None:
             raise RequestValidationError("scope_required")
         start_month = self._company_start_month_cached(execution)
@@ -244,8 +247,6 @@ class EnterpriseToolExecutor:
     def get_monthly_emission_trend_chart(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import _chart_answer, _monthly_chart
-
         start_month = self._company_start_month_cached(execution)
         data = self.gateway.get_scope_emission_for_month(
             execution.company_id,
@@ -274,8 +275,6 @@ class EnterpriseToolExecutor:
     def get_top_emission_activities_chart(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import _chart_answer, _top_chart
-
         start_month = self._company_start_month_cached(execution)
         data = self.gateway.get_top_activity_items_by_emission(
             execution.company_id,
@@ -297,8 +296,6 @@ class EnterpriseToolExecutor:
     def get_base_detail_monthly_chart(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import _base_detail_monthly_chart, _chart_answer
-
         start_month = self._company_start_month_cached(execution)
         base = self._resolve_base(
             execution,
@@ -324,12 +321,6 @@ class EnterpriseToolExecutor:
     def get_base_detail_composition_chart(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import (
-            _base_detail_composition_chart,
-            _chart_answer,
-            _fiscal_months,
-        )
-
         start_month = self._company_start_month_cached(execution)
         base = self._resolve_base(
             execution,
@@ -361,13 +352,6 @@ class EnterpriseToolExecutor:
     def get_base_emission_composition_chart(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import (
-            _base_group_composition_chart,
-            _chart_answer,
-            _fiscal_months,
-            _group_by,
-        )
-
         start_month = self._company_start_month_cached(execution)
         period_start, period_end = _fiscal_months(execution.year, start_month)
         group_by = _group_by(arguments.get("group_by"))
@@ -398,13 +382,6 @@ class EnterpriseToolExecutor:
     def get_base_monthly_emission_chart(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import (
-            _base_group_monthly_chart,
-            _chart_answer,
-            _fiscal_months,
-            _group_by,
-        )
-
         start_month = self._company_start_month_cached(execution)
         bases = self._resolve_bases(
             execution,
@@ -440,8 +417,6 @@ class EnterpriseToolExecutor:
     def compare_base_emissions_chart(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import _base_comparison_chart, _chart_answer
-
         start_month = self._company_start_month_cached(execution)
         bases = self._resolve_bases(
             execution,
@@ -470,13 +445,6 @@ class EnterpriseToolExecutor:
     def compare_emission_periods_chart(
         self, arguments: dict[str, Any], execution: _ExecutionContext
     ) -> _HandlerResult:
-        from ai_native.gateway.service import (
-            _period_comparison_answer,
-            _period_comparison_chart,
-            _period_comparison_payload,
-            _validated_period,
-        )
-
         start_month = self._company_start_month_cached(execution)
         first = _validated_period(
             arguments.get("start_month"), arguments.get("end_month")
@@ -514,8 +482,6 @@ class EnterpriseToolExecutor:
     def _base_chart_result(
         self, chart: ChartSpec, base: AnalysisBase, locale: str
     ) -> _HandlerResult:
-        from ai_native.gateway.service import _chart_answer
-
         return _HandlerResult(
             answer=_chart_answer(chart, locale),
             artifact=chart,
@@ -530,8 +496,6 @@ class EnterpriseToolExecutor:
         locale: str,
         safe_facts: dict[str, Any] | None = None,
     ) -> _HandlerResult:
-        from ai_native.gateway.service import _chart_answer
-
         base_facts = [
             {"base_id": base.base_id, "name": base.name} for base in bases
         ]
@@ -561,8 +525,6 @@ class EnterpriseToolExecutor:
     def _require_company_access(
         self, principal: Principal, company_id: str, bearer_token: str
     ) -> None:
-        from ai_native.gateway.service import CompanyForbiddenError, _body
-
         allowed = {principal.company_id}
         payload = self.gateway.list_direct_child_companies(auth_token=bearer_token)
         for item in _body(payload):
@@ -583,8 +545,6 @@ class EnterpriseToolExecutor:
             raise CompanyForbiddenError(company_id)
 
     def _company_start_month_cached(self, execution: _ExecutionContext) -> int:
-        from ai_native.gateway.service import _body
-
         if execution.start_month is None:
             execution.step()
             payload = _body(
@@ -604,8 +564,6 @@ class EnterpriseToolExecutor:
         return execution.start_month
 
     def _company_name_cached(self, execution: _ExecutionContext) -> str:
-        from ai_native.gateway.service import _body
-
         if execution.company_name is None:
             execution.step()
             payload = _body(
@@ -654,8 +612,6 @@ class EnterpriseToolExecutor:
         base_id: Any = None,
         base_name: Any = None,
     ) -> AnalysisBase:
-        from ai_native.gateway.service import RequestValidationError
-
         payload = self._bases_payload_cached(execution)
         try:
             base = self.base_resolver.resolve(
@@ -688,8 +644,6 @@ class EnterpriseToolExecutor:
         base_names: Any = None,
         minimum: int,
     ) -> list[AnalysisBase]:
-        from ai_native.gateway.service import RequestValidationError
-
         raw_ids = list(base_ids or [])
         raw_names = list(base_names or [])
         values = [(value, None) for value in raw_ids] or [

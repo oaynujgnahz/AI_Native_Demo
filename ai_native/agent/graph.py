@@ -1,244 +1,295 @@
+"""Compatibility facade backed by the policy-gated agent runtime.
+
+The historical one-shot LangGraph implementation was removed in Task 6.  This
+module keeps ``build_graph().invoke(...)`` available for callers that still use
+the original demo contract; Task 8 migrates those callers to ``AgentRuntime``.
+"""
+
 from __future__ import annotations
 
-import logging
 import re
-from typing import Any, Dict, Literal, Optional
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from typing import Any, Mapping, Sequence
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage, BaseMessage
-from langgraph.graph import END, START, StateGraph
 
-from ai_native.agent.state import LegacyAgentState
+from ai_native.agent.actions import AgentAction, SafeObservation
 from ai_native.agent.llm import OpenAIToolPlanner
-from ai_native.gateway.cmpf_client import CmpfGateway
+from ai_native.agent.runtime import build_agent_runtime
+from ai_native.gateway.auth import Principal
 from ai_native.gateway.context import BusinessContext
+from ai_native.gateway.errors import GatewayAgentError
+from ai_native.gateway.observer import Artifact, ExecutionResult
+from ai_native.gateway.policy import PolicyEngine
 from ai_native.gateway.registry import ToolRegistry
-
-logger = logging.getLogger(__name__)
-
-
-def build_graph(
-    gateway: Optional[CmpfGateway] = None,
-    planner: Optional[Any] = None,
-    use_env_planner: bool = True,
-):
-    cmpf_gateway = gateway or CmpfGateway()
-    registry = ToolRegistry(cmpf_gateway)
-    tool_planner = planner if planner is not None else (
-        OpenAIToolPlanner.from_env() if use_env_planner else None
-    )
-    logger.info(
-        "Graph initialized: gateway_mode=%s planner=%s",
-        cmpf_gateway.mode,
-        type(tool_planner).__name__ if tool_planner else "rule-fallback",
-    )
-
-    graph_builder = StateGraph(LegacyAgentState)
-    graph_builder.add_node("plan", _build_plan_node(registry, tool_planner))
-    graph_builder.add_node("business_tool", _build_tool_node(registry))
-    graph_builder.add_node("answer", _answer)
-
-    graph_builder.add_edge(START, "plan")
-    graph_builder.add_conditional_edges(
-        "plan",
-        _route_after_plan,
-        {
-            "tool": "business_tool",
-            "answer": "answer",
-        },
-    )
-    graph_builder.add_edge("business_tool", "answer")
-    graph_builder.add_edge("answer", END)
-    return graph_builder.compile()
+from ai_native.gateway.runtime_context import RuntimeContext
+from ai_native.gateway.tooling import build_enterprise_catalog
 
 
-def _build_plan_node(registry: ToolRegistry, planner: Optional[Any]):
-    def plan_node(state: LegacyAgentState) -> Dict[str, Any]:
-        user_text = _last_user_text(state)
-        year = state.get("year") or _extract_year(user_text)
-        company_id = state.get("company_id") or _extract_company_id(user_text)
-        logger.info(
-            "Planning input: user_text=%r extracted_company_id=%s extracted_year=%s",
-            user_text,
-            company_id,
-            year,
-        )
+class _CompatibilityPlanner:
+    def __init__(self, planner: Any, registry: ToolRegistry) -> None:
+        self.planner = planner
+        self.registry = registry
+        self.direct_answer: str | None = None
 
-        if planner is not None:
-            try:
-                decision = planner.plan(user_text, registry)
-            except Exception as exc:
-                logger.warning(
-                    "LLM planning failed, falling back to rules: %s",
-                    exc,
-                    exc_info=True,
-                )
-                decision = None
-            if decision and decision.tool_name:
-                arguments = dict(decision.arguments)
-                arguments.setdefault("company_id", company_id or "cmpf-demo")
-                if decision.tool_name != "get_company_info":
-                    arguments.setdefault("year", int(year or 2025))
-                logger.info(
-                    "Planning selected by LLM: tool=%s arguments=%s",
-                    decision.tool_name,
-                    arguments,
-                )
-                return {
-                    "intent": "tool",
-                    "tool_name": decision.tool_name,
-                    "tool_arguments": arguments,
-                    "company_id": arguments.get("company_id", company_id),
-                    "year": arguments.get("year", year),
-                }
-            if decision and decision.direct_answer:
-                logger.info("Planning selected direct LLM answer")
-                return {
-                    "intent": "chat",
-                    "direct_answer": decision.direct_answer,
-                    "company_id": company_id,
-                    "year": year,
-                }
-
-        tool_name = _select_tool(user_text)
-        intent = "tool" if tool_name else "chat"
-        logger.info(
-            "Planning selected by rules: intent=%s tool=%s arguments=%s",
-            intent,
-            tool_name,
-            _default_tool_arguments(tool_name, company_id, year),
-        )
-        return {
-            "intent": intent,
-            "tool_name": tool_name,
-            "tool_arguments": _default_tool_arguments(tool_name, company_id, year),
-            "company_id": company_id,
-            "year": year,
-        }
-
-    return plan_node
-
-
-def _route_after_plan(state: LegacyAgentState) -> Literal["tool", "answer"]:
-    if state.get("intent") == "tool":
-        return "tool"
-    return "answer"
-
-
-def _build_tool_node(registry: ToolRegistry):
-    def tool_node(state: LegacyAgentState) -> Dict[str, Any]:
-        tool_name = state.get("tool_name") or "get_emission_dashboard"
-        company_id = state.get("company_id") or "cmpf-demo"
-        context = BusinessContext(
-            user_id=state.get("user_id", "local-user"),
-            tenant_id=state.get("tenant_id", "local"),
-            company_id=company_id,
-            permissions=state.get("permissions", ["cmpf:read"]),
-            auth_token=state.get("auth_token"),
-        )
-        arguments = state.get("tool_arguments") or _default_tool_arguments(
-            tool_name,
-            company_id,
-            state.get("year"),
-        )
-        logger.info("Tool node executing: tool=%s arguments=%s", tool_name, arguments)
-        result = registry.execute(tool_name, arguments, context)
-        if not result.allowed:
-            logger.warning(
-                "Tool node denied: tool=%s error_code=%s",
-                tool_name,
-                result.error_code,
+    def plan(
+        self,
+        *,
+        goal: str,
+        trusted_context: Mapping[str, Any],
+        observations: Sequence[SafeObservation | Mapping[str, Any]],
+        artifact_summaries: Sequence[Mapping[str, Any]],
+        remaining: Mapping[str, Any],
+    ) -> AgentAction:
+        del remaining
+        if artifact_summaries:
+            return AgentAction(
+                kind="finish",
+                artifact_ids=[str(artifact_summaries[-1]["id"])],
             )
-            return {"tool_results": {tool_name: {"error_code": result.error_code}}}
-        logger.info("Tool node completed: tool=%s result_keys=%s", tool_name, list((result.data or {}).keys()))
-        return {"tool_results": {tool_name: result.data}}
-
-    return tool_node
-
-
-def _answer(state: LegacyAgentState) -> Dict[str, Any]:
-    tool_name = state.get("tool_name") or "get_emission_dashboard"
-    result = state.get("tool_results", {}).get(tool_name)
-    if result:
-        if result.get("error_code") == "permission_denied":
-            answer = "当前用户没有调用 CMPF 读取工具的权限，需要 `cmpf:read` 权限。"
-        elif tool_name == "get_scope_breakdown":
-            answer = _format_scope_breakdown_answer(result)
-        elif tool_name == "get_company_info":
-            answer = _format_company_info_answer(result)
-        else:
-            answer = _format_dashboard_answer(result)
-    else:
-        answer = state.get("direct_answer") or "我现在已经可以接入 CMPF 业务工具。请告诉我要查询的公司和年度，例如：查 cmpf-demo 公司 2025 年碳排放情况。"
-    logger.info("Answer generated: tool=%s length=%s", tool_name, len(answer))
-    return {"messages": [AIMessage(content=answer)]}
-
-
-def _default_tool_arguments(
-    tool_name: Optional[str],
-    company_id: Optional[str],
-    year: Optional[int],
-) -> Dict[str, Any]:
-    normalized_company_id = company_id or "cmpf-demo"
-    if tool_name == "get_company_info":
-        return {"company_id": normalized_company_id}
-    return {"company_id": normalized_company_id, "year": int(year or 2025)}
-
-
-def _format_dashboard_answer(result: Dict[str, Any]) -> str:
-    if "body" in result:
-        return (
-            "已从 CMPF dashBoard/scope_total_emission_volume 接口取得结果。\n"
-            f"原始返回：{result}"
+        decision = None
+        if self.planner is not None:
+            try:
+                decision = self.planner.plan(goal, self.registry)
+            except Exception:
+                decision = None
+        company_id = str(trusted_context.get("company_id") or "cmpf-demo")
+        year = int(trusted_context.get("year") or _extract_year(goal) or 2025)
+        if decision is not None and decision.direct_answer and not decision.tool_name:
+            self.direct_answer = decision.direct_answer
+            return AgentAction(
+                kind="call_tool",
+                tool_name="get_company_info",
+                arguments={"company_id": company_id},
+            )
+        selected = decision.tool_name if decision is not None else None
+        arguments = dict(decision.arguments) if selected else {}
+        if selected == "get_emission_dashboard":
+            selected = "get_annual_emission_summary"
+        if selected not in {
+            "get_annual_emission_summary",
+            "get_scope_breakdown",
+            "get_company_info",
+        }:
+            selected = _select_compatibility_tool(goal)
+        if selected is None:
+            self.direct_answer = (
+                "我现在已经可以接入 CMPF 业务工具。请告诉我要查询的公司和年度，"
+                "例如：查 cmpf-demo 公司 2025 年碳排放情况。"
+            )
+            selected = "get_company_info"
+        arguments.setdefault("company_id", company_id)
+        if selected != "get_company_info":
+            arguments.setdefault("year", year)
+        return AgentAction(
+            kind="call_tool",
+            tool_name=selected,
+            arguments=arguments,
+            reason="legacy compatibility routing",
         )
 
-    company_id = result.get("company_id", "unknown")
-    year = result.get("year", "unknown")
-    scope1 = result.get("scope1_tco2e", 0)
-    scope2 = result.get("scope2_tco2e", 0)
-    scope3 = result.get("scope3_tco2e", 0)
-    total = result.get("total_tco2e", 0)
-    source = result.get("source", "cmpf")
-    return (
-        f"{company_id} 公司 {year} 年碳排放情况如下（数据源：{source}）：\n"
-        f"- Scope1：{scope1} tCO2e\n"
-        f"- Scope2：{scope2} tCO2e\n"
-        f"- Scope3：{scope3} tCO2e\n"
-        f"- 总排放：{total} tCO2e"
+
+class _CompatibilityExecutor:
+    def __init__(self, planner: _CompatibilityPlanner, registry: ToolRegistry) -> None:
+        self.planner = planner
+        self.registry = registry
+
+    def execute(self, **kwargs: Any) -> ExecutionResult:
+        tool_name = str(kwargs["tool_name"])
+        arguments = dict(kwargs["arguments"])
+        direct_answer = self.planner.direct_answer
+        if direct_answer is not None:
+            self.planner.direct_answer = None
+            return _answer_result(tool_name, arguments, direct_answer)
+        registry_tool = (
+            "get_emission_dashboard"
+            if tool_name == "get_annual_emission_summary"
+            else tool_name
+        )
+        principal = kwargs["principal"]
+        result = self.registry.execute(
+            registry_tool,
+            arguments,
+            BusinessContext(
+                user_id=principal.user_id,
+                tenant_id=principal.role_id,
+                company_id=str(arguments.get("company_id") or principal.company_id),
+                permissions=["cmpf:read"],
+                auth_token=kwargs["bearer_token"],
+            ),
+        )
+        if not result.allowed:
+            raise GatewayAgentError("policy", result.error_code or "tool_denied")
+        data = result.data or {}
+        if registry_tool == "get_scope_breakdown":
+            answer = _format_scope_breakdown_answer(data)
+        elif registry_tool == "get_company_info":
+            answer = _format_company_info_answer(data)
+        else:
+            answer = _format_dashboard_answer(data)
+        return _answer_result(tool_name, arguments, answer)
+
+
+class _CompatibilityRepository:
+    def __init__(self, principal: Principal) -> None:
+        self.principal = principal
+
+    def get_run(self, run_id: str):
+        return SimpleNamespace(
+            id=run_id,
+            status="running",
+            user_id=self.principal.user_id,
+            company_id=self.principal.company_id,
+            conversation_id=run_id,
+        )
+
+    def write_audit(self, entry: Mapping[str, Any]) -> None:
+        del entry
+
+
+class _CompatibilityGraph:
+    def __init__(self, gateway: Any, planner: Any) -> None:
+        self.gateway = gateway
+        self.planner = planner
+
+    def invoke(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        goal = _last_user_text(state)
+        company_id = str(state.get("company_id") or _extract_company_id(goal) or "cmpf-demo")
+        principal = Principal(
+            subject=str(state.get("user_id") or "local-user"),
+            user_id=str(state.get("user_id") or "local-user"),
+            company_id=company_id,
+            role_id=str(state.get("tenant_id") or "local"),
+        )
+        repository = _CompatibilityRepository(principal)
+        registry = ToolRegistry(self.gateway)
+        planner = _CompatibilityPlanner(self.planner, registry)
+        catalog = build_enterprise_catalog()
+        runtime = build_agent_runtime(
+            planner=planner,
+            policy_engine=PolicyEngine(catalog),
+            executor=_CompatibilityExecutor(planner, registry),
+        )
+        result = runtime.invoke(
+            RuntimeContext(
+                principal=principal,
+                bearer_token=str(state.get("auth_token") or ""),
+                deadline=datetime.now(timezone.utc) + timedelta(seconds=45),
+                repository=repository,
+                is_cancelled=lambda: False,
+            ),
+            goal,
+            company_id=company_id,
+            allowed_company_ids=[company_id],
+            year=state.get("year") or _extract_year(goal),
+        )
+        if result.status != "completed":
+            raise GatewayAgentError("runtime", result.error_code or result.status)
+        messages = list(state.get("messages", []))
+        messages.append(AIMessage(content=result.answer))
+        return {**dict(state), "messages": messages}
+
+
+def build_graph(gateway=None, planner=None, use_env_planner: bool = True):
+    from ai_native.gateway.cmpf_client import CmpfGateway
+
+    selected_gateway = gateway or CmpfGateway()
+    selected_planner = planner
+    if selected_planner is None and use_env_planner:
+        selected_planner = OpenAIToolPlanner.from_env()
+    return _CompatibilityGraph(selected_gateway, selected_planner)
+
+
+def _answer_result(
+    tool_name: str, arguments: Mapping[str, Any], answer: str
+) -> ExecutionResult:
+    artifact_id = str(uuid4())
+    return ExecutionResult(
+        tool_name=tool_name,
+        endpoint=f"compatibility:{tool_name}",
+        safe_facts={
+            "company_id": str(arguments.get("company_id") or "cmpf-demo"),
+            **({"year": arguments["year"]} if "year" in arguments else {}),
+        },
+        artifact=Artifact(
+            id=artifact_id,
+            kind="answer",
+            payload={"answer": answer},
+        ),
+        result_count=1,
     )
 
 
-def _format_scope_breakdown_answer(result: Dict[str, Any]) -> str:
-    if "body" in result:
-        return (
-            "已从 CMPF dashBoard/scope_emission_volume 接口取得 Scope 明细。\n"
-            f"原始返回：{result}"
-        )
+def _last_user_text(state: Mapping[str, Any]) -> str:
+    for message in reversed(state.get("messages", [])):
+        if isinstance(message, BaseMessage) and message.type == "human":
+            return str(message.content)
+        if isinstance(message, Mapping) and message.get("role") == "user":
+            return str(message.get("content", ""))
+    return ""
 
+
+def _select_compatibility_tool(text: str) -> str | None:
+    lowered = text.casefold()
+    looks_business = any(
+        word in lowered
+        for word in ("碳排放", "排放", "emission", "scope", "co2", "co₂", "公司", "企業", "企业")
+    )
+    if not looks_business:
+        return None
+    if any(word in lowered for word in ("明细", "内訳", "breakdown", "scope")):
+        return "get_scope_breakdown"
+    if any(word in lowered for word in ("会社情報", "公司信息", "company info", "住所", "address")):
+        return "get_company_info"
+    return "get_annual_emission_summary"
+
+
+def _extract_year(text: str) -> int | None:
+    match = re.search(r"(20\d{2})", text)
+    return int(match.group(1)) if match else None
+
+
+def _extract_company_id(text: str) -> str | None:
+    match = re.search(r"([A-Za-z][A-Za-z0-9_-]{2,})\s*(?:公司|企業|企业)?", text)
+    return match.group(1) if match else None
+
+
+def _format_dashboard_answer(result: Mapping[str, Any]) -> str:
+    if "body" in result:
+        return "已从 CMPF dashBoard/scope_total_emission_volume 接口取得结果。\n" f"原始返回：{dict(result)}"
     company_id = result.get("company_id", "unknown")
     year = result.get("year", "unknown")
-    scopes = result.get("scopes", [])
+    return (
+        f"{company_id} 公司 {year} 年碳排放情况如下（数据源：{result.get('source', 'cmpf')}）：\n"
+        f"- Scope1：{result.get('scope1_tco2e', 0)} tCO2e\n"
+        f"- Scope2：{result.get('scope2_tco2e', 0)} tCO2e\n"
+        f"- Scope3：{result.get('scope3_tco2e', 0)} tCO2e\n"
+        f"- 总排放：{result.get('total_tco2e', 0)} tCO2e"
+    )
+
+
+def _format_scope_breakdown_answer(result: Mapping[str, Any]) -> str:
+    if "body" in result:
+        return "已从 CMPF dashBoard/scope_emission_volume 接口取得 Scope 明细。\n" f"原始返回：{dict(result)}"
     lines = [
-        f"{company_id} 公司 {year} 年 Scope 明细如下（数据源：{result.get('source', 'cmpf')}）："
+        f"{result.get('company_id', 'unknown')} 公司 {result.get('year', 'unknown')} 年 Scope 明细如下（数据源：{result.get('source', 'cmpf')}）："
     ]
-    for item in scopes:
+    for item in result.get("scopes", []):
         lines.append(
             f"- {item.get('scope')}：{item.get('emission_tco2e')} tCO2e，占比 {item.get('share')}"
         )
     return "\n".join(lines)
 
 
-def _format_company_info_answer(result: Dict[str, Any]) -> str:
+def _format_company_info_answer(result: Mapping[str, Any]) -> str:
     if "body" in result:
-        return (
-            "已从 CMPF dashBoard/scope_emission_volume 接口取得公司信息。\n"
-            f"原始返回：{result}"
-        )
-    company_info = result.get("company_info", [])
-    company_id = result.get("company_id", "unknown")
+        return "已从 CMPF 接口取得公司信息。\n" f"原始返回：{dict(result)}"
     lines = [
-        f"{company_id} 公司信息如下（数据源：{result.get('source', 'cmpf')}）："
+        f"{result.get('company_id', 'unknown')} 公司信息如下（数据源：{result.get('source', 'cmpf')}）："
     ]
-    for item in company_info:
+    for item in result.get("company_info", []):
         lines.append(
             "- "
             f"公司名：{item.get('company_name', '-')}; "
@@ -248,42 +299,5 @@ def _format_company_info_answer(result: Dict[str, Any]) -> str:
         )
     return "\n".join(lines)
 
-def _last_user_text(state: LegacyAgentState) -> str:
-    for message in reversed(state.get("messages", [])):
-        if isinstance(message, BaseMessage):
-            if message.type == "human":
-                return str(message.content)
-        elif isinstance(message, dict) and message.get("role") == "user":
-            return str(message.get("content", ""))
-    return ""
 
-
-def _looks_like_emission_question(text: str) -> bool:
-    keywords = ("碳排放", "排放", "emission", "Scope", "scope", "CO2", "CO₂", "公司", "企業", "企业")
-    return any(keyword in text for keyword in keywords)
-
-
-def _select_tool(text: str) -> Optional[str]:
-    if not _looks_like_emission_question(text):
-        return None
-    if any(keyword in text for keyword in ("明细", "内訳", "breakdown", "Scope", "scope")):
-        return "get_scope_breakdown"
-    if any(keyword in text for keyword in ("碳排放", "排放", "emission", "CO2", "CO₂")):
-        return "get_emission_dashboard"
-    elif any(keyword in text for keyword in ("公司", "企業", "企业")):
-        return "get_company_info"
-    return "get_emission_dashboard"
-
-
-def _extract_year(text: str) -> Optional[int]:
-    match = re.search(r"(20\d{2})", text)
-    if not match:
-        return None
-    return int(match.group(1))
-
-
-def _extract_company_id(text: str) -> Optional[str]:
-    match = re.search(r"([A-Za-z][A-Za-z0-9_-]{2,})\s*(?:公司|企業|企业)?", text)
-    if match:
-        return match.group(1)
-    return None
+__all__ = ["build_agent_runtime", "build_graph"]

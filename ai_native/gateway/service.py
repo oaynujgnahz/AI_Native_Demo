@@ -10,6 +10,8 @@ from ai_native.agent.llm import ToolCallDecision
 from ai_native.gateway.auth import Principal
 from ai_native.gateway.base_resolver import AnalysisBase
 from ai_native.gateway.charts import ChartSeries, ChartSource, ChartSpec
+from ai_native.gateway.errors import CompanyForbiddenError, RequestValidationError
+from ai_native.gateway.executor import EnterpriseToolExecutor
 from ai_native.gateway.tooling import (
     ENTERPRISE_TOOL_NAMES,
     ToolCatalog,
@@ -17,19 +19,6 @@ from ai_native.gateway.tooling import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class CompanyForbiddenError(Exception):
-    pass
-
-
-class RequestValidationError(Exception):
-    def __init__(
-        self, code: str, candidates: Optional[list[dict[str, str]]] = None
-    ) -> None:
-        super().__init__(code)
-        self.code = code
-        self.candidates = list(candidates or [])[:20]
 
 
 @dataclass(frozen=True)
@@ -53,8 +42,6 @@ class EnterpriseAgentService:
         self.repository = repository
         self.planner = planner
         self.tool_catalog = EnterpriseToolCatalog()
-        from ai_native.gateway.executor import EnterpriseToolExecutor
-
         self.executor = EnterpriseToolExecutor(
             gateway, repository, catalog=self.tool_catalog
         )
