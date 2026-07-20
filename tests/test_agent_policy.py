@@ -6,25 +6,42 @@ from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from pydantic import ValidationError
+
 from ai_native.agent.actions import AgentAction
 from ai_native.agent.budgets import AgentBudgets, RunCounters, canonical_tool_signature
 from ai_native.gateway.auth import Principal
-from pydantic import ValidationError
 
 
 class RecordingRepository:
-    def __init__(self, status: str = "running") -> None:
+    def __init__(
+        self,
+        status: str = "running",
+        user_id: str | None = "user-1",
+        company_id: str | None = "100",
+        conversation_id: str | None = "conversation-1",
+    ) -> None:
         self.status = status
+        self.user_id = user_id
+        self.company_id = company_id
+        self.conversation_id = conversation_id
         self.calls: list[str] = []
 
     def get_run(self, run_id: str):
         self.calls.append(run_id)
-        return SimpleNamespace(id=run_id, status=self.status)
+        return SimpleNamespace(
+            id=run_id,
+            status=self.status,
+            user_id=self.user_id,
+            company_id=self.company_id,
+            conversation_id=self.conversation_id,
+        )
 
 
 def make_state(**overrides):
     state = {
         "run_id": "run-1",
+        "conversation_id": "conversation-1",
         "company_id": "100",
         "allowed_company_ids": ["100", "200"],
         "counters": RunCounters(AgentBudgets()),
@@ -102,8 +119,9 @@ class PolicyEngineTest(unittest.TestCase):
         self.assertEqual(result.error_code, "company_forbidden")
         self.assertNotIn("request-secret", json.dumps(result.model_dump()))
 
-    def test_approved_tool_has_server_approval_and_validated_arguments(self):
-        result = make_policy(approval_id_factory=lambda: "approval-1").evaluate(
+    def test_approved_tool_has_signed_approval_and_validated_arguments(self):
+        policy = make_policy(approval_signing_key=b"a" * 32)
+        result = policy.evaluate(
             AgentAction(
                 kind="call_tool",
                 tool_name="get_annual_emission_summary",
@@ -114,7 +132,8 @@ class PolicyEngineTest(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "approved")
-        self.assertEqual(result.approval_id, "approval-1")
+        self.assertTrue(result.approval_id)
+        self.assertTrue(policy.verify_approval(result))
         self.assertEqual(
             result.validated_arguments,
             {"company_id": "100", "year": 2025},
@@ -122,6 +141,113 @@ class PolicyEngineTest(unittest.TestCase):
         self.assertEqual(state["counters"].tool_calls, 1)
         self.assertEqual(state["counters"].tool_signatures, [result.signature])
         self.assertNotIn("request-secret", json.dumps(result.model_dump()))
+
+    def test_validated_arguments_are_fresh_and_do_not_change_signed_json(self):
+        policy = make_policy(approval_signing_key=b"a" * 32)
+        result = policy.evaluate(
+            AgentAction(
+                kind="call_tool",
+                tool_name="get_annual_emission_summary",
+                arguments={"company_id": "100", "year": 2025},
+            ),
+            make_state(),
+            make_context(),
+        )
+        stored = result.validated_arguments_json
+
+        first = result.validated_arguments
+        first["company_id"] = "999"
+
+        self.assertEqual(result.validated_arguments["company_id"], "100")
+        self.assertEqual(result.validated_arguments_json, stored)
+        self.assertTrue(policy.verify_approval(result))
+
+    def test_approved_decision_is_frozen(self):
+        policy = make_policy(approval_signing_key=b"a" * 32)
+        result = policy.evaluate(
+            AgentAction(
+                kind="call_tool",
+                tool_name="get_company_info",
+                arguments={"company_id": "100"},
+            ),
+            make_state(),
+            make_context(),
+        )
+
+        with self.assertRaises(ValidationError):
+            result.tool_name = "list_analysis_bases"
+        with self.assertRaises(AttributeError):
+            result.missing_fields.append("company_id")
+
+    def test_forged_or_modified_approval_fails_verification(self):
+        from ai_native.gateway.policy import PolicyDecision
+
+        policy = make_policy(approval_signing_key=b"a" * 32)
+        result = policy.evaluate(
+            AgentAction(
+                kind="call_tool",
+                tool_name="get_company_info",
+                arguments={"company_id": "100"},
+            ),
+            make_state(),
+            make_context(),
+        )
+        forged = PolicyDecision(
+            status="approved",
+            approval_id="caller-supplied",
+            tool_name=result.tool_name,
+            signature=result.signature,
+            validated_arguments_json=result.validated_arguments_json,
+        )
+
+        self.assertFalse(policy.verify_approval(forged))
+        for modified in (
+            result.model_copy(update={"approval_id": "caller-supplied"}),
+            result.model_copy(update={"tool_name": "list_analysis_bases"}),
+            result.model_copy(update={"signature": "0" * 64}),
+            result.model_copy(
+                update={"validated_arguments_json": '{"company_id":"200"}'}
+            ),
+        ):
+            with self.subTest(modified=modified):
+                self.assertFalse(policy.verify_approval(modified))
+
+    def test_cross_engine_approval_fails_verification(self):
+        first = make_policy(approval_signing_key=b"a" * 32)
+        second = make_policy(approval_signing_key=b"b" * 32)
+        result = first.evaluate(
+            AgentAction(
+                kind="call_tool",
+                tool_name="get_company_info",
+                arguments={"company_id": "100"},
+            ),
+            make_state(),
+            make_context(),
+        )
+
+        self.assertTrue(first.verify_approval(result))
+        self.assertFalse(second.verify_approval(result))
+
+    def test_caller_constructed_decision_rejects_sensitive_nested_keys(self):
+        from ai_native.gateway.policy import PolicyDecision
+
+        for arguments_json in (
+            '{"token":"secret"}',
+            '{"filters":{"authorization":"secret"}}',
+            '{"filters":[{"raw_payload":{"private":true}}]}',
+            '{"chart":{"series":[{"values":[1]}]}}',
+            '{"emissionVolume":12.3}',
+            '{"cookie":"secret"}',
+        ):
+            with self.subTest(arguments_json=arguments_json):
+                with self.assertRaisesRegex(ValidationError, "sensitive"):
+                    PolicyDecision(
+                        status="approved",
+                        approval_id="forged",
+                        tool_name="get_company_info",
+                        signature="0" * 64,
+                        validated_arguments_json=arguments_json,
+                    )
 
     def test_cancelled_precedes_tool_checks_and_has_no_side_effects(self):
         repository = RecordingRepository()
@@ -163,7 +289,7 @@ class PolicyEngineTest(unittest.TestCase):
 
         self.assertEqual(result.status, "clarification_required")
         self.assertEqual(result.question, "Which year?")
-        self.assertEqual(result.missing_fields, ["year"])
+        self.assertEqual(result.missing_fields, ("year",))
         self.assertEqual(state["counters"].tool_calls, 0)
         self.assertEqual(state["counters"].clarification_calls, 1)
         self.assertEqual(repository.calls, ["run-1"])
@@ -192,22 +318,21 @@ class PolicyEngineTest(unittest.TestCase):
             make_context(repository=repository),
         )
 
-        self.assertEqual(result.error_code, "run_inactive")
+        self.assertEqual(result.error_code, "active_run_conflict")
         self.assertEqual(counters.clarification_calls, 0)
 
     def test_finish_action_is_approved_without_tool_side_effect(self):
         repository = RecordingRepository()
         state = make_state()
-        result = make_policy(approval_id_factory=lambda: "approval-finish").evaluate(
+        policy = make_policy(approval_signing_key=b"a" * 32)
+        result = policy.evaluate(
             AgentAction(kind="finish", artifact_ids=["artifact-1"]),
             state,
             make_context(repository=repository),
         )
 
-        self.assertEqual(
-            (result.status, result.approval_id),
-            ("approved", "approval-finish"),
-        )
+        self.assertEqual(result.status, "approved")
+        self.assertTrue(policy.verify_approval(result))
         self.assertEqual(result.validated_arguments, {})
         self.assertEqual(state["counters"].tool_calls, 0)
         self.assertEqual(repository.calls, ["run-1"])
@@ -313,10 +438,51 @@ class PolicyEngineTest(unittest.TestCase):
             make_context(repository=repository),
         )
 
-        self.assertEqual(result.error_code, "run_inactive")
+        self.assertEqual(result.error_code, "active_run_conflict")
         self.assertEqual(repository.calls, ["run-1"])
         self.assertEqual(counters.tool_calls, 0)
         self.assertEqual(counters.tool_signatures, [])
+
+    def test_run_ownership_mismatch_is_denied_without_reserving_budget(self):
+        cases = (
+            RecordingRepository(user_id="other-user"),
+            RecordingRepository(company_id="200"),
+            RecordingRepository(conversation_id="other-conversation"),
+            RecordingRepository(user_id=None),
+            RecordingRepository(company_id=None),
+            RecordingRepository(conversation_id=None),
+        )
+        for repository in cases:
+            with self.subTest(run=repository.__dict__):
+                counters = RunCounters(AgentBudgets())
+                result = make_policy().evaluate(
+                    AgentAction(
+                        kind="call_tool",
+                        tool_name="get_company_info",
+                        arguments={"company_id": "100"},
+                    ),
+                    make_state(counters=counters),
+                    make_context(repository=repository),
+                )
+
+                self.assertEqual(result.error_code, "active_run_conflict")
+                self.assertEqual(counters.tool_calls, 0)
+                self.assertEqual(counters.tool_signatures, [])
+
+    def test_run_must_match_current_principal_company(self):
+        counters = RunCounters(AgentBudgets())
+        result = make_policy().evaluate(
+            AgentAction(
+                kind="call_tool",
+                tool_name="get_company_info",
+                arguments={"company_id": "100"},
+            ),
+            make_state(counters=counters),
+            make_context(company_id="999"),
+        )
+
+        self.assertEqual(result.error_code, "active_run_conflict")
+        self.assertEqual(counters.tool_calls, 0)
 
 
 if __name__ == "__main__":
