@@ -16,7 +16,11 @@ from ai_native.agent.budgets import AgentBudgets, BudgetExceeded, RunCounters
 from ai_native.agent.planner import AgentPlanner, OpenAIActionPlanner
 from ai_native.agent.state import AgentState
 from ai_native.gateway.charts import ChartSpec
-from ai_native.gateway.errors import GatewayAgentError, RequestValidationError
+from ai_native.gateway.errors import (
+    CompanyForbiddenError,
+    GatewayAgentError,
+    RequestValidationError,
+)
 from ai_native.gateway.executor import EnterpriseToolExecutor
 from ai_native.gateway.observer import Artifact, ExecutionResult, ObservationBuilder
 from ai_native.gateway.policy import PolicyDecision, PolicyEngine
@@ -127,9 +131,16 @@ class AgentRuntime:
         context: RuntimeContext,
         run_id: str,
         user_input: str,
+        *,
+        trusted_context: Mapping[str, Any] | None = None,
     ) -> AgentRuntimeResult:
         result = self.graph.invoke(
-            Command(resume={"message": user_input}),
+            Command(
+                resume={
+                    "message": user_input,
+                    "context": dict(trusted_context or {}),
+                }
+            ),
             config=_config(run_id),
             context=context,
         )
@@ -286,7 +297,12 @@ class AgentRuntime:
                 },
             )
         except RequestValidationError as exc:
-            return _error_update("validation", exc.code)
+            update = _error_update("validation", exc.code)
+            if exc.candidates:
+                update["candidates"] = list(exc.candidates)
+            return update
+        except CompanyForbiddenError:
+            return _error_update("authorization", "company_forbidden")
         except GatewayAgentError as exc:
             return _error_update(exc.category, exc.code)
         except Exception:
@@ -362,17 +378,37 @@ class AgentRuntime:
         resumed = interrupt(payload)
         if isinstance(resumed, Mapping):
             user_input = resumed.get("message", "")
+            trusted_context = resumed.get("context", {})
         else:
             user_input = resumed
+            trusted_context = {}
         clarification = str(user_input).strip()
         goal = state.get("goal", "")
         if clarification:
             goal = f"{goal}\nUser clarification: {clarification}"
-        return {
+        update: AgentState = {
             "goal": goal,
             "pending_question": "",
             "missing_fields": [],
         }
+        if isinstance(trusted_context, Mapping):
+            company_id = trusted_context.get("company_id")
+            if company_id is not None:
+                update["company_id"] = str(company_id)
+            allowed_company_ids = trusted_context.get("allowed_company_ids")
+            if isinstance(allowed_company_ids, Sequence) and not isinstance(
+                allowed_company_ids, (str, bytes)
+            ):
+                update["allowed_company_ids"] = [
+                    str(item) for item in allowed_company_ids
+                ]
+            year = trusted_context.get("year")
+            if year is not None:
+                update["year"] = int(year)
+            locale = trusted_context.get("locale")
+            if locale is not None:
+                update["locale"] = str(locale)
+        return update
 
     def _responder_node(
         self,
@@ -463,6 +499,7 @@ class AgentRuntime:
             status=_status_for_error(category, code),
             error_code=code,
             artifact_ids=tuple(state.get("artifact_ids", [])),
+            candidates=tuple(state.get("candidates", [])),
         )
         with self._lock:
             self._responses[run_id] = result
@@ -533,6 +570,7 @@ class AgentRuntime:
                 ),
                 error_code=code,
                 artifact_ids=tuple(state.get("artifact_ids", [])),
+                candidates=tuple(state.get("candidates", [])),
             )
         return AgentRuntimeResult(
             run_id=run_id,

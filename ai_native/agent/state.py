@@ -34,6 +34,7 @@ class AgentState(TypedDict):
     approval_signature: NotRequired[Optional[str]]
     pending_question: NotRequired[str]
     missing_fields: NotRequired[List[str]]
+    candidates: NotRequired[List[dict[str, str]]]
     stop_reason: NotRequired[str]
     error_code: NotRequired[str]
     error_category: NotRequired[str]

@@ -37,6 +37,7 @@
     table { width: 100%; border-collapse: collapse; margin-top: 8px; }
     th, td { border-bottom: 1px solid #e4eaf0; padding: 6px; text-align: left; }
     form { padding: 14px 18px; border-top: 1px solid #e4eaf0; display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+    .send-actions { display: flex; flex-direction: column; gap: 8px; }
     #status { font-size: 12px; color: #607286; }
     @media (max-width: 760px) { main { grid-template-columns: 1fr; } section { min-height: 620px; } }
   </style>
@@ -63,13 +64,15 @@
   <section>
     <header><strong>CMPF Copilot Demo</strong><span id="status">Ready</span></header>
     <div id="messages"></div>
-    <form id="chat"><textarea id="question" placeholder="質問を入力してください"></textarea><button>Send</button></form>
+    <form id="chat"><textarea id="question" placeholder="質問を入力してください"></textarea><div class="send-actions"><button id="send">Send</button><button type="button" id="stop" class="secondary" disabled>Stop</button></div></form>
   </section>
 </main>
 <script>
   let conversationId = null;
   let accessToken = null;
   let oidcConfig = null;
+  let activeRunId = null;
+  let streamController = null;
   const byId = id => document.getElementById(id);
   const statusNode = byId('status');
   const messages = byId('messages');
@@ -90,6 +93,7 @@
   async function setAuthenticated(token) {
     accessToken = token;
     conversationId = null;
+    activeRunId = null;
     const claims = tokenClaims(token);
     if (claims.companyId !== undefined) byId('company').value = String(claims.companyId);
     byId('auth-state').textContent = 'Checking CMPF APIs…';
@@ -112,6 +116,8 @@
   function clearAuthentication() {
     accessToken = null;
     conversationId = null;
+    activeRunId = null;
+    streamController = null;
     byId('auth-state').textContent = 'Not logged in';
     byId('login').disabled = false;
     byId('logout').disabled = true;
@@ -206,33 +212,66 @@
   function parseSse(text) {
     return text.trim().split('\n\n').filter(Boolean).map(block => { const lines = block.split('\n'); return { event: lines[0].slice(7), data: JSON.parse(lines.slice(1).join('\n').slice(6)) }; });
   }
-  async function requestConversation(question, retryOnMissing = true) {
+  async function requestConversation(question, signal, retryOnMissing = true) {
     const id = await ensureConversation();
-    const response = await fetch(`/v1/conversations/${id}/messages/stream`, { method: 'POST', headers: headers(), body: JSON.stringify({ message: question, context: { company_id: byId('company').value, year: Number(byId('year').value), locale: 'ja' } }) });
+    const response = await fetch(`/v1/conversations/${id}/messages/stream`, { method: 'POST', headers: headers(), signal, body: JSON.stringify({ message: question, context: { company_id: byId('company').value, year: Number(byId('year').value), locale: 'ja' } }) });
     if (response.ok) return response;
     let payload = null;
     try { payload = await response.json(); } catch (_) {}
     if (retryOnMissing && response.status === 404 && payload?.detail?.code === 'conversation_not_found') {
       conversationId = null;
-      return requestConversation(question, false);
+      activeRunId = null;
+      return requestConversation(question, signal, false);
     }
     throw new Error(payload ? JSON.stringify(payload) : `Gateway request failed (${response.status})`);
   }
   async function send(question) {
     addMessage('user', question); statusNode.textContent = 'Running…';
+    streamController = new AbortController();
+    byId('send').disabled = true;
     try {
-      const response = await requestConversation(question);
+      const response = await requestConversation(question, streamController.signal);
+      activeRunId = response.headers.get('X-Agent-Run-Id') || activeRunId;
+      byId('stop').disabled = !activeRunId;
       let assistant = null;
       for (const item of parseSse(await response.text())) {
+        activeRunId = item.data.run_id || activeRunId;
         if (item.event === 'answer.delta') assistant = addMessage('assistant', item.data.delta);
+        if (item.event === 'clarification') assistant = addMessage('assistant', item.data.question);
         if (item.event === 'visualization' && assistant) renderChart(assistant, item.data);
-        if (item.event === 'status') statusNode.textContent = item.data.tool;
+        if (item.event === 'status') statusNode.textContent = item.data.tool || item.data.state;
+        if (item.event === 'clarification') statusNode.textContent = 'Waiting for your reply';
+        if (item.event === 'answer.completed') activeRunId = null;
       }
-      statusNode.textContent = 'Completed';
-    } catch (error) { addMessage('assistant', `Error: ${error.message}`); statusNode.textContent = 'Error'; }
+      if (!activeRunId) statusNode.textContent = 'Completed';
+    } catch (error) {
+      if (error.name !== 'AbortError') addMessage('assistant', `Error: ${error.message}`);
+      statusNode.textContent = error.name === 'AbortError' ? 'Cancelled' : 'Error';
+    } finally {
+      streamController = null;
+      byId('send').disabled = false;
+      byId('stop').disabled = !activeRunId;
+    }
+  }
+  async function stopRun() {
+    if (!conversationId || !activeRunId) return;
+    byId('stop').disabled = true;
+    statusNode.textContent = 'Cancelling…';
+    try {
+      const response = await fetch(`/v1/conversations/${conversationId}/runs/${activeRunId}/cancel`, { method: 'POST', headers: headers() });
+      if (!response.ok) throw new Error(`Cancel failed (${response.status})`);
+      activeRunId = null;
+      if (streamController) streamController.abort();
+      statusNode.textContent = 'Cancelled';
+    } catch (error) {
+      addMessage('assistant', `Error: ${error.message}`);
+      statusNode.textContent = 'Cancel failed';
+      byId('stop').disabled = false;
+    }
   }
   document.querySelectorAll('[data-prompt]').forEach(button => button.addEventListener('click', () => { const prompt = button.dataset.prompt.replace('{year}', byId('year').value).replace('{scope}', byId('scope').value); byId('question').value = prompt; send(prompt); }));
   byId('chat').addEventListener('submit', event => { event.preventDefault(); const value = byId('question').value.trim(); if (value) { byId('question').value = ''; send(value); } });
+  byId('stop').addEventListener('click', stopRun);
   byId('login').addEventListener('click', () => beginLogin().catch(error => { byId('auth-state').textContent = error.message; }));
   byId('logout').addEventListener('click', clearAuthentication);
   initializeAuthentication().catch(error => { clearAuthentication(); byId('auth-state').textContent = error.message; });

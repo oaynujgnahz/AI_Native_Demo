@@ -235,7 +235,6 @@ class PolicyEngine:
         return (
             value("status") == "running"
             and value("user_id") == principal.user_id
-            and value("company_id") == state_company_id
             and value("company_id") == principal.company_id
             and value("conversation_id") == conversation_id
         )
