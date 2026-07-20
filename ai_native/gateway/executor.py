@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from pydantic import ValidationError
+
 from ai_native.gateway.auth import Principal
 from ai_native.gateway.base_resolver import (
     AnalysisBase,
@@ -100,13 +102,20 @@ class EnterpriseToolExecutor:
         )
 
         definition = self.catalog.get(tool_name)
+        try:
+            validated = definition.argument_model.model_validate(arguments)
+        except ValidationError as exc:
+            raise RequestValidationError("invalid_tool_arguments") from exc
+        validated_arguments = validated.model_dump(mode="python", exclude_none=True)
         company_id = str(
-            arguments.get("company_id")
+            validated_arguments.get("company_id")
             or context.get("company_id")
             or principal.company_id
         )
-        year = _year(arguments.get("year", context.get("year")), message)
-        scope = _scope_value(arguments.get("scope"), message)
+        year = _year(
+            validated_arguments.get("year", context.get("year")), message
+        )
+        scope = _scope_value(validated_arguments.get("scope"), message)
         locale = _locale(context.get("locale") or principal.locale)
 
         self._require_company_access(principal, company_id, bearer_token)
@@ -127,7 +136,7 @@ class EnterpriseToolExecutor:
         )
         execution.company_name = self._company_name_cached(execution)
         handler = getattr(self, definition.handler_name)
-        handled = handler(dict(arguments), execution)
+        handled = handler(validated_arguments, execution)
         safe_facts = {
             "company_id": company_id,
             "company_name": execution.company_name,

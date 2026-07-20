@@ -822,7 +822,7 @@ class ControlledAnalysisLoopTest(unittest.TestCase):
                 message="6拠点を比較",
                 context={},
             )
-        self.assertEqual(str(raised.exception), "too_many_bases")
+        self.assertEqual(str(raised.exception), "invalid_tool_arguments")
         self.assertNotIn("list_analysis_bases", gateway.calls)
 
 
