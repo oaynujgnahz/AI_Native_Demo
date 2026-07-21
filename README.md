@@ -45,7 +45,9 @@ export CMPF_GATEWAY_MODE=http
 export CMPF_AGENT_DEMO_MODE=true
 export CMPF_AGENT_DEMO_TOKEN='replace-with-a-local-secret'
 unset DATABASE_URL
-.venv/bin/uvicorn ai_native.api:app --host 127.0.0.1 --port 8787
+lsof -nP -iTCP:8787 -sTCP:LISTEN
+kill <PID>
+.venv/bin/uvicorn ai_native.api:app --host 127.0.0.1 --port 8787 --reload
 ```
 
 Gateway **only supports real CMPF HTTP APIs** (`CMPF_GATEWAY_MODE=mock` is rejected). Without `DATABASE_URL`, conversation/run/artifact and checkpoint storage stay in-process memory (fine for local demos; resume does not survive restart). Unit tests use `tests/fakes.py`, not mock business data. Browser Demo Keycloak login targets a real environment; the demo-token curl below is only for explicit local demo auth.
