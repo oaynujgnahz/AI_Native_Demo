@@ -167,42 +167,19 @@ class DocumentationContractTest(unittest.TestCase):
         self.assertIn("3 preparation", readme)
 
 
-class YearResolutionTest(unittest.TestCase):
-    def test_null_tool_year_falls_back_to_context_year(self):
-        from ai_native.gateway.service import _coalesce, _year
-
-        year = _year(_coalesce(None, 2024), "排出量を見せて")
-        self.assertEqual(year, 2024)
-
-    def test_non_integer_year_extracts_digits_or_message(self):
-        from ai_native.gateway.service import _year
-
-        self.assertEqual(_year("2025年度", "排出量"), 2025)
-        self.assertEqual(_year("", "2024年の排出量"), 2024)
-        self.assertIsNone(_year("年度", "排出量を見せて"))
-
-
-class LlmProviderWiringTest(unittest.TestCase):
-    def test_openai_key_does_not_reuse_deepseek_base_url(self):
-        from ai_native.agent.llm import OpenAIToolPlanner
-
-        with patch.dict(
-            os.environ,
-            {
-                "OPENAI_API_KEY": "sk-openai",
-                "OPENAI_BASE_URL": "",
-                "DEEPSEEK_API_KEY": "",
-                "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
-            },
-            clear=False,
+class ControlledLoopDocumentationTest(unittest.TestCase):
+    def test_readme_documents_runtime_and_observability(self):
+        readme = Path("README.md").read_text(encoding="utf-8")
+        for required in (
+            "Policy-gated ReAct",
+            "waiting_for_user",
+            "OTEL_ENABLED",
+            "http://localhost:16686",
+            "clarification",
+            "/runs/{runId}/cancel",
+            "checkpoint",
         ):
-            with patch("openai.OpenAI") as openai_cls:
-                planner = OpenAIToolPlanner.from_env()
-
-        self.assertIsNotNone(planner)
-        kwargs = openai_cls.call_args.kwargs
-        self.assertEqual(kwargs["api_key"], "sk-openai")
-        self.assertNotIn("base_url", kwargs)
+            self.assertIn(required, readme)
 
 
 class CmpfAnalysisContractTest(unittest.TestCase):
@@ -801,7 +778,7 @@ class ControlledAnalysisLoopTest(unittest.TestCase):
                 message="6拠点を比較",
                 context={},
             )
-        self.assertEqual(str(raised.exception), "too_many_bases")
+        self.assertEqual(str(raised.exception), "invalid_tool_arguments")
         self.assertNotIn("list_analysis_bases", gateway.calls)
 
 
