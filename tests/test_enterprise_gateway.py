@@ -11,6 +11,8 @@ import httpx
 
 from fastapi.testclient import TestClient
 
+from tests.fakes import FakeCmpfGateway
+
 
 class FakeAuthenticator:
     def authenticate(self, token: str):
@@ -25,64 +27,6 @@ class FakeAuthenticator:
             role_id="role-1",
             locale="ja",
         )
-
-
-class FakeCmpfGateway:
-    mode = "mock"
-
-    def list_direct_child_companies(self, auth_token=None):
-        return [{"value": "200", "label": "Child 200"}]
-
-    def get_company_start_months(self, auth_token=None):
-        return {"100": 4, "200": 1}
-
-    def get_company_info(self, company_id, auth_token=None):
-        return {"body": {"companyId": company_id, "companyName": f"Company {company_id}"}}
-
-    def get_dashboard_summary(self, company_id, year, company_start_month=1, auth_token=None):
-        return {
-            "body": {
-                "companyId": company_id,
-                "year": year,
-                "scope1": 10.0,
-                "scope2": 20.0,
-                "scope3": 70.0,
-                "total": 100.0,
-            }
-        }
-
-    def get_scope_breakdown(self, company_id, year, company_start_month=1, auth_token=None):
-        return {"body": [{"scope": "Scope 1", "emissionVolume": 10.0}]}
-
-    def get_scope_summary(self, company_id, year, company_start_month, scope, locale, auth_token=None):
-        return {
-            "body": [
-                {"largeItem": "燃料", "emissionVolume": 12.5},
-                {"largeItem": "電力", "emissionVolume": 20.0},
-            ]
-        }
-
-    def get_scope_emission_for_month(
-        self, company_id, year, company_start_month, scope, locale, auth_token=None
-    ):
-        return {
-            "body": [
-                {"activityMonth": "2025-04", "emissionVolume": 1.5},
-                {"activityMonth": "2025-05", "emissionVolume": 2.5},
-            ]
-        }
-
-    def get_top_activity_items_by_emission(
-        self, company_id, year, company_start_month, locale, auth_token=None
-    ):
-        return {
-            "body": {
-                "items": [
-                    {"emissionSourceName": "Gas", "emissionVolume": 50.0},
-                    {"emissionSourceName": "Power", "emissionVolume": 40.0},
-                ]
-            }
-        }
 
 
 class ChartSpecTest(unittest.TestCase):
@@ -223,15 +167,50 @@ class DocumentationContractTest(unittest.TestCase):
         self.assertIn("3 preparation", readme)
 
 
+class YearResolutionTest(unittest.TestCase):
+    def test_null_tool_year_falls_back_to_context_year(self):
+        from ai_native.gateway.service import _coalesce, _year
+
+        year = _year(_coalesce(None, 2024), "排出量を見せて")
+        self.assertEqual(year, 2024)
+
+    def test_non_integer_year_extracts_digits_or_message(self):
+        from ai_native.gateway.service import _year
+
+        self.assertEqual(_year("2025年度", "排出量"), 2025)
+        self.assertEqual(_year("", "2024年の排出量"), 2024)
+        self.assertIsNone(_year("年度", "排出量を見せて"))
+
+
+class LlmProviderWiringTest(unittest.TestCase):
+    def test_openai_key_does_not_reuse_deepseek_base_url(self):
+        from ai_native.agent.llm import OpenAIToolPlanner
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "sk-openai",
+                "OPENAI_BASE_URL": "",
+                "DEEPSEEK_API_KEY": "",
+                "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+            },
+            clear=False,
+        ):
+            with patch("openai.OpenAI") as openai_cls:
+                planner = OpenAIToolPlanner.from_env()
+
+        self.assertIsNotNone(planner)
+        kwargs = openai_cls.call_args.kwargs
+        self.assertEqual(kwargs["api_key"], "sk-openai")
+        self.assertNotIn("base_url", kwargs)
+
+
 class CmpfAnalysisContractTest(unittest.TestCase):
-    def test_mock_period_comparison_matches_real_cmpf_response_shape(self):
+    def test_mock_mode_is_rejected(self):
         from ai_native.gateway.cmpf_client import CmpfGateway
 
-        payload = CmpfGateway(mode="mock").compare_emissions_by_duration({})
-
-        self.assertEqual(len(payload["body"]), 2)
-        self.assertIn("scopeAndTotalData", payload["body"][0])
-        self.assertIn("total", payload["body"][0]["scopeAndTotalData"][0])
+        with self.assertRaises(ValueError):
+            CmpfGateway(mode="mock")
 
     def test_site_and_period_analysis_methods_use_fixed_cmpf_contracts(self):
         from ai_native.gateway.cmpf_client import CmpfGateway
@@ -255,7 +234,7 @@ class CmpfAnalysisContractTest(unittest.TestCase):
                 return Response()
 
         gateway = CmpfGateway(
-            mode="http", carbon_api_base_url="http://carbon", http_client=HttpClient()
+            carbon_api_base_url="http://carbon", http_client=HttpClient()
         )
         gateway.list_analysis_bases("100", "ja", auth_token="token")
         gateway.get_base_type_emission({"companyId": "100"}, auth_token="token")
@@ -310,7 +289,7 @@ class CmpfAnalysisContractTest(unittest.TestCase):
                 return Response()
 
         gateway = CmpfGateway(
-            mode="http", carbon_api_base_url="http://carbon", http_client=HttpClient()
+            carbon_api_base_url="http://carbon", http_client=HttpClient()
         )
         gateway.get_scope_summary("100", 2025, 4, 3, "ja", auth_token="token")
 
@@ -1181,10 +1160,21 @@ class EnterpriseApiTest(unittest.TestCase):
             json={"message": "共同拠点の月別推移", "context": {"locale": "ja"}},
         )
 
-        self.assertEqual(response.status_code, 422)
-        self.assertEqual(response.json()["detail"]["code"], "base_ambiguous")
+        self.assertEqual(response.status_code, 200)
+        events = []
+        for block in response.text.strip().split("\n\n"):
+            lines = block.splitlines()
+            events.append(
+                (
+                    lines[0].removeprefix("event: "),
+                    json.loads(lines[1].removeprefix("data: ")),
+                )
+            )
+        error = next(data for event, data in events if event == "error")
+        self.assertEqual(error["code"], "base_ambiguous")
+        self.assertEqual(error["status"], 422)
         self.assertEqual(
-            response.json()["detail"]["candidates"],
+            error["candidates"],
             [
                 {"base_id": "10", "name": "共同拠点"},
                 {"base_id": "11", "name": "共同拠点"},
@@ -1202,7 +1192,18 @@ class EnterpriseApiTest(unittest.TestCase):
                 "context": {"company_id": "999", "year": 2025, "locale": "ja"},
             },
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        events = [
+            (
+                block.splitlines()[0].removeprefix("event: "),
+                json.loads(block.splitlines()[1].removeprefix("data: ")),
+            )
+            for block in response.text.strip().split("\n\n")
+            if block
+        ]
+        error = next(data for event, data in events if event == "error")
+        self.assertEqual(error["code"], "company_forbidden")
+        self.assertEqual(error["status"], 403)
 
     def test_deleted_conversation_cannot_be_read(self):
         created = self.client.post("/v1/conversations", headers=self.headers, json={}).json()

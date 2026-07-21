@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -32,6 +33,7 @@ from ai_native.agent.llm import OpenAIToolPlanner
 from ai_native.logging_config import configure_logging
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 class ConversationCreateRequest(BaseModel):
@@ -227,44 +229,50 @@ def create_app(
         principal, bearer_token = identity
         _owned_conversation(conversation_repository, conversation_id, principal.user_id)
         context = request.context.model_dump(exclude_none=True)
-        try:
-            with request_limiter.limit(principal.user_id):
-                result = agent_service.answer(
-                    principal=principal,
-                    bearer_token=bearer_token,
-                    message=request.message,
-                    context=context,
-                )
-        except (RequestLimitExceeded, ConcurrentLimitExceeded) as exc:
-            raise HTTPException(
-                status_code=429, detail={"code": "rate_limited"}
-            ) from exc
-        except CompanyForbiddenError as exc:
-            raise HTTPException(
-                status_code=403, detail={"code": "company_forbidden"}
-            ) from exc
-        except RequestValidationError as exc:
-            detail = {"code": exc.code}
-            if exc.candidates:
-                detail["candidates"] = exc.candidates
-            raise HTTPException(
-                status_code=422, detail=detail
-            ) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=502, detail={"code": "upstream_error"}
-            ) from exc
-
-        conversation_repository.add_message(
-            conversation_id, "user", request.message
-        )
-        chart_payload = result.chart.model_dump(mode="json") if result.chart else None
-        assistant_message = conversation_repository.add_message(
-            conversation_id, "assistant", result.answer, chart_payload
-        )
 
         def events():
-            yield _sse("status", {"state": "tool_completed", "tool": result.tool_name})
+            yield _sse("status", {"state": "started"})
+            try:
+                with request_limiter.limit(principal.user_id):
+                    result = agent_service.answer(
+                        principal=principal,
+                        bearer_token=bearer_token,
+                        message=request.message,
+                        context=context,
+                    )
+                    conversation_repository.add_message(
+                        conversation_id, "user", request.message
+                    )
+                    chart_payload = (
+                        result.chart.model_dump(mode="json") if result.chart else None
+                    )
+                    assistant_message = conversation_repository.add_message(
+                        conversation_id, "assistant", result.answer, chart_payload
+                    )
+            except (RequestLimitExceeded, ConcurrentLimitExceeded):
+                yield _sse("error", {"code": "rate_limited", "status": 429})
+                return
+            except CompanyForbiddenError:
+                yield _sse("error", {"code": "company_forbidden", "status": 403})
+                return
+            except RequestValidationError as exc:
+                detail: Dict[str, Any] = {"code": exc.code, "status": 422}
+                if exc.candidates:
+                    detail["candidates"] = exc.candidates
+                yield _sse("error", detail)
+                return
+            except Exception:
+                logger.exception(
+                    "Unhandled stream failure conversation_id=%s user_id=%s",
+                    conversation_id,
+                    principal.user_id,
+                )
+                yield _sse("error", {"code": "upstream_error", "status": 502})
+                return
+
+            yield _sse(
+                "status", {"state": "tool_completed", "tool": result.tool_name}
+            )
             yield _sse("answer.delta", {"delta": result.answer})
             if chart_payload:
                 yield _sse("visualization", chart_payload)

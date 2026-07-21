@@ -15,18 +15,18 @@
 
 LLM 只接收用户问题和经过校验的页面默认参数，用于意图识别与参数提取。CMPF API 返回的数据和生成的 ChartSpec 不发送给模型，工具执行、会社范围与最终权限判断仍由 Gateway/CMPF 完成。
 
-## 本地 Mock Demo
+## 本地启动
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
-export CMPF_GATEWAY_MODE=mock
-export CMPF_AGENT_DEMO_MODE=true
-export CMPF_AGENT_DEMO_TOKEN=cmpf-demo-token
-.venv/bin/uvicorn ai_native.api:app --host 127.0.0.1 --port 8787
+cp .env.example .env   # 填入真实 CMPF / Keycloak / LLM 配置
+docker compose up -d postgres
+export DATABASE_URL=postgresql://cmpf_agent:cmpf_agent@localhost:5432/cmpf_agent
+.venv/bin/uvicorn ai_native.api:app --host 127.0.0.1 --port 8787 --reload
 ```
 
-Mock 模式主要用于自动化和 API 测试；浏览器 Demo 使用真实 Keycloak 登录。
+Gateway **仅支持真实 HTTP API**（`CMPF_GATEWAY_MODE=mock` 已移除）。单元测试使用 `tests/fakes.py` 中的 Fake gateway，不会走 mock 业务数据。
 
 ## PostgreSQL
 

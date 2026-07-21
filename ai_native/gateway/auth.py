@@ -56,7 +56,9 @@ class ExplicitDemoAuthenticator:
     """Development-only authenticator enabled by an explicit environment flag."""
 
     def authenticate(self, token: str) -> Principal:
-        expected = os.getenv("CMPF_AGENT_DEMO_TOKEN", "cmpf-demo-token")
+        expected = os.getenv("CMPF_AGENT_DEMO_TOKEN")
+        if not expected:
+            raise AuthenticationError("demo_token_not_configured")
         if token != expected:
             raise AuthenticationError("invalid_demo_token")
         return Principal(
@@ -104,4 +106,3 @@ def _principal_from_claims(payload: Dict[str, Any]) -> Principal:
 def _normalize_locale(value: Any) -> str:
     text = str(value or "ja").lower()
     return "en" if text.startswith("en") or text == "1" else "ja"
-

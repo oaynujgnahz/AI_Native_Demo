@@ -224,9 +224,10 @@
       const response = await requestConversation(question);
       let assistant = null;
       for (const item of parseSse(await response.text())) {
+        if (item.event === 'error') throw new Error(JSON.stringify(item.data));
         if (item.event === 'answer.delta') assistant = addMessage('assistant', item.data.delta);
         if (item.event === 'visualization' && assistant) renderChart(assistant, item.data);
-        if (item.event === 'status') statusNode.textContent = item.data.tool;
+        if (item.event === 'status') statusNode.textContent = item.data.state || item.data.tool || 'Running…';
       }
       statusNode.textContent = 'Completed';
     } catch (error) { addMessage('assistant', `Error: ${error.message}`); statusNode.textContent = 'Error'; }

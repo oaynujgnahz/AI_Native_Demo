@@ -74,22 +74,43 @@ def _build_plan_node(registry: ToolRegistry, planner: Optional[Any]):
                 )
                 decision = None
             if decision and decision.tool_name:
-                arguments = dict(decision.arguments)
-                arguments.setdefault("company_id", company_id or "cmpf-demo")
-                if decision.tool_name != "get_company_info":
-                    arguments.setdefault("year", int(year or 2025))
-                logger.info(
-                    "Planning selected by LLM: tool=%s arguments=%s",
-                    decision.tool_name,
-                    arguments,
-                )
-                return {
-                    "intent": "tool",
-                    "tool_name": decision.tool_name,
-                    "tool_arguments": arguments,
-                    "company_id": arguments.get("company_id", company_id),
-                    "year": arguments.get("year", year),
-                }
+                allowed_tools = {tool.name for tool in registry.list_tools()}
+                if decision.tool_name not in allowed_tools:
+                    logger.warning(
+                        "LLM selected unknown tool=%s; falling back to rules",
+                        decision.tool_name,
+                    )
+                    decision = None
+                else:
+                    arguments = dict(decision.arguments)
+                    if company_id:
+                        arguments.setdefault("company_id", company_id)
+                    if (
+                        decision.tool_name != "get_company_info"
+                        and year is not None
+                    ):
+                        arguments.setdefault("year", int(year))
+                    if "company_id" not in arguments or (
+                        decision.tool_name != "get_company_info"
+                        and "year" not in arguments
+                    ):
+                        logger.info(
+                            "LLM tool missing required args; falling back to rules"
+                        )
+                        decision = None
+                    else:
+                        logger.info(
+                            "Planning selected by LLM: tool=%s arguments=%s",
+                            decision.tool_name,
+                            arguments,
+                        )
+                        return {
+                            "intent": "tool",
+                            "tool_name": decision.tool_name,
+                            "tool_arguments": arguments,
+                            "company_id": arguments.get("company_id", company_id),
+                            "year": arguments.get("year", year),
+                        }
             if decision and decision.direct_answer:
                 logger.info("Planning selected direct LLM answer")
                 return {
@@ -127,7 +148,11 @@ def _route_after_plan(state: AgentState) -> Literal["tool", "answer"]:
 def _build_tool_node(registry: ToolRegistry):
     def tool_node(state: AgentState) -> Dict[str, Any]:
         tool_name = state.get("tool_name") or "get_emission_dashboard"
-        company_id = state.get("company_id") or "cmpf-demo"
+        company_id = state.get("company_id")
+        if not company_id:
+            return {
+                "tool_results": {tool_name: {"error_code": "company_required"}}
+            }
         context = BusinessContext(
             user_id=state.get("user_id", "local-user"),
             tenant_id=state.get("tenant_id", "local"),
@@ -140,6 +165,8 @@ def _build_tool_node(registry: ToolRegistry):
             company_id,
             state.get("year"),
         )
+        if "company_id" not in arguments:
+            arguments["company_id"] = company_id
         logger.info("Tool node executing: tool=%s arguments=%s", tool_name, arguments)
         result = registry.execute(tool_name, arguments, context)
         if not result.allowed:
@@ -149,7 +176,11 @@ def _build_tool_node(registry: ToolRegistry):
                 result.error_code,
             )
             return {"tool_results": {tool_name: {"error_code": result.error_code}}}
-        logger.info("Tool node completed: tool=%s result_keys=%s", tool_name, list((result.data or {}).keys()))
+        logger.info(
+            "Tool node completed: tool=%s result_keys=%s",
+            tool_name,
+            list((result.data or {}).keys()),
+        )
         return {"tool_results": {tool_name: result.data}}
 
     return tool_node
@@ -159,8 +190,15 @@ def _answer(state: AgentState) -> Dict[str, Any]:
     tool_name = state.get("tool_name") or "get_emission_dashboard"
     result = state.get("tool_results", {}).get(tool_name)
     if result:
-        if result.get("error_code") == "permission_denied":
+        error_code = result.get("error_code")
+        if error_code == "permission_denied":
             answer = "当前用户没有调用 CMPF 读取工具的权限，需要 `cmpf:read` 权限。"
+        elif error_code == "unknown_tool":
+            answer = "无法识别请求的业务工具，请换一种问法或指定要查询的排放指标。"
+        elif error_code == "company_required":
+            answer = "请提供公司 ID，例如：查 cmpf-demo 公司 2025 年碳排放情况。"
+        elif error_code:
+            answer = f"工具调用失败（{error_code}），请稍后重试或换一种问法。"
         elif tool_name == "get_scope_breakdown":
             answer = _format_scope_breakdown_answer(result)
         elif tool_name == "get_company_info":
@@ -168,7 +206,10 @@ def _answer(state: AgentState) -> Dict[str, Any]:
         else:
             answer = _format_dashboard_answer(result)
     else:
-        answer = state.get("direct_answer") or "我现在已经可以接入 CMPF 业务工具。请告诉我要查询的公司和年度，例如：查 cmpf-demo 公司 2025 年碳排放情况。"
+        answer = state.get("direct_answer") or (
+            "我现在已经可以接入 CMPF 业务工具。请告诉我要查询的公司和年度，"
+            "例如：查 cmpf-demo 公司 2025 年碳排放情况。"
+        )
     logger.info("Answer generated: tool=%s length=%s", tool_name, len(answer))
     return {"messages": [AIMessage(content=answer)]}
 
@@ -178,10 +219,13 @@ def _default_tool_arguments(
     company_id: Optional[str],
     year: Optional[int],
 ) -> Dict[str, Any]:
-    normalized_company_id = company_id or "cmpf-demo"
+    if not company_id:
+        return {}
     if tool_name == "get_company_info":
-        return {"company_id": normalized_company_id}
-    return {"company_id": normalized_company_id, "year": int(year or 2025)}
+        return {"company_id": company_id}
+    if year is None:
+        return {"company_id": company_id}
+    return {"company_id": company_id, "year": int(year)}
 
 
 def _format_dashboard_answer(result: Dict[str, Any]) -> str:

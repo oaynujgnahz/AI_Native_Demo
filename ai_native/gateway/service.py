@@ -120,7 +120,7 @@ class EnterpriseAgentService:
             or context.get("company_id")
             or principal.company_id
         )
-        year = _year(arguments.get("year", context.get("year")), message)
+        year = _year(_coalesce(arguments.get("year"), context.get("year")), message)
         scope = _scope_value(arguments.get("scope"), message)
 
         self._require_company_access(principal, company_id, bearer_token)
@@ -136,199 +136,213 @@ class EnterpriseAgentService:
         )
         chart = None
         audit_details: Dict[str, Any] = {}
-
-        if tool_name == "get_company_info":
-            data = self.gateway.get_company_info(company_id, auth_token=bearer_token)
-            answer = _company_answer(data, company_id, locale)
-        elif tool_name == "list_analysis_bases":
-            payload = self._bases_payload_cached(
-                execution, principal, company_id, locale, bearer_token
-            )
-            bases = self.base_resolver.list(payload, company_id=company_id)
-            answer = _base_list_answer(bases, company_name, locale)
-            audit_details["result_count"] = len(bases)
-        elif tool_name == "get_annual_emission_summary":
-            start_month = self._company_start_month_cached(
-                execution, principal, company_id, bearer_token
-            )
-            data = self.gateway.get_dashboard_summary(
-                company_id, year, start_month, auth_token=bearer_token
-            )
-            answer = _summary_answer(data, company_name, year, locale)
-        elif tool_name == "get_scope_breakdown":
-            start_month = self._company_start_month_cached(
-                execution, principal, company_id, bearer_token
-            )
-            data = self.gateway.get_scope_breakdown(
-                company_id, year, start_month, auth_token=bearer_token
-            )
-            answer = _breakdown_answer(data, company_name, year, locale)
-        else:
-            start_month = self._company_start_month_cached(
-                execution, principal, company_id, bearer_token
-            )
-            if tool_name == "get_scope_composition_chart":
-                if scope is None:
-                    raise RequestValidationError("scope_required")
-                data = self.gateway.get_scope_summary(
-                    company_id, year, start_month, scope, locale, auth_token=bearer_token
+        try:
+            if tool_name == "get_company_info":
+                data = self.gateway.get_company_info(company_id, auth_token=bearer_token)
+                answer = _company_answer(data, company_id, locale)
+            elif tool_name == "list_analysis_bases":
+                payload = self._bases_payload_cached(
+                    execution, principal, company_id, locale, bearer_token
                 )
-                chart = _composition_chart(data, company_id, company_name, year, scope)
-            elif tool_name == "get_monthly_emission_trend_chart":
-                data = self.gateway.get_scope_emission_for_month(
-                    company_id, year, start_month, scope, locale, auth_token=bearer_token
+                bases = self.base_resolver.list(payload, company_id=company_id)
+                answer = _base_list_answer(bases, company_name, locale)
+                audit_details["result_count"] = len(bases)
+            elif tool_name == "get_annual_emission_summary":
+                start_month = self._company_start_month_cached(
+                    execution, principal, company_id, bearer_token
                 )
-                chart = _monthly_chart(data, company_id, company_name, year)
-            elif tool_name == "get_top_emission_activities_chart":
-                data = self.gateway.get_top_activity_items_by_emission(
-                    company_id, year, start_month, locale, auth_token=bearer_token
+                data = self.gateway.get_dashboard_summary(
+                    company_id, year, start_month, auth_token=bearer_token
                 )
-                chart = _top_chart(data, company_id, company_name, year)
-            elif tool_name == "get_base_detail_monthly_chart":
-                base = self._resolve_base(
-                    execution,
-                    principal,
-                    company_id,
-                    locale,
-                    bearer_token,
-                    base_id=arguments.get("base_id"),
-                    base_name=arguments.get("base_name"),
+                answer = _summary_answer(data, company_name, year, locale)
+            elif tool_name == "get_scope_breakdown":
+                start_month = self._company_start_month_cached(
+                    execution, principal, company_id, bearer_token
                 )
-                data = self.gateway.get_base_month_emission(
-                    company_id,
-                    base.base_id,
-                    year,
-                    start_month,
-                    auth_token=bearer_token,
+                data = self.gateway.get_scope_breakdown(
+                    company_id, year, start_month, auth_token=bearer_token
                 )
-                chart = _base_detail_monthly_chart(
-                    data, company_id, company_name, base, year
-                )
-                audit_details["base_ids"] = [base.base_id]
-            elif tool_name == "get_base_detail_composition_chart":
-                base = self._resolve_base(
-                    execution,
-                    principal,
-                    company_id,
-                    locale,
-                    bearer_token,
-                    base_id=arguments.get("base_id"),
-                    base_name=arguments.get("base_name"),
-                )
-                period_start, period_end = _fiscal_months(year, start_month)
-                data = self.gateway.get_base_large_item_emission(
-                    company_id,
-                    base.base_id,
-                    period_start,
-                    period_end,
-                    auth_token=bearer_token,
-                )
-                chart = _base_detail_composition_chart(
-                    data, company_id, company_name, base, year
-                )
-                audit_details["base_ids"] = [base.base_id]
-            elif tool_name == "get_base_emission_composition_chart":
-                period_start, period_end = _fiscal_months(year, start_month)
-                group_by = _group_by(arguments.get("group_by"))
-                payload = {
-                    "companyId": company_id,
-                    "year": year,
-                    "companyStartMonth": start_month,
-                    "startMonth": period_start,
-                    "endMonth": period_end,
-                    "baseList": [],
-                    "dynamicTab": group_by,
-                }
-                data = self.gateway.get_base_type_emission(
-                    payload, auth_token=bearer_token
-                )
-                chart = _base_group_composition_chart(
-                    data, company_id, company_name, year, group_by
-                )
-            elif tool_name == "get_base_monthly_emission_chart":
-                bases = self._resolve_bases(
-                    execution,
-                    principal,
-                    company_id,
-                    locale,
-                    bearer_token,
-                    base_ids=arguments.get("base_ids"),
-                    base_names=arguments.get("base_names"),
-                    minimum=1,
-                )
-                group_by = _group_by(arguments.get("group_by"))
-                period_start, period_end = _fiscal_months(year, start_month)
-                payload = {
-                    "companyId": company_id,
-                    "year": year,
-                    "companyStartMonth": start_month,
-                    "startMonth": period_start,
-                    "endMonth": period_end,
-                    "baseList": [base.base_id for base in bases],
-                    "dynamicTab": group_by,
-                }
-                data = self.gateway.get_base_type_emission_for_month(
-                    payload, auth_token=bearer_token
-                )
-                chart = _base_group_monthly_chart(
-                    data, company_id, company_name, bases, year
-                )
-                audit_details["base_ids"] = [base.base_id for base in bases]
-            elif tool_name == "compare_base_emissions_chart":
-                bases = self._resolve_bases(
-                    execution,
-                    principal,
-                    company_id,
-                    locale,
-                    bearer_token,
-                    base_ids=arguments.get("base_ids"),
-                    base_names=arguments.get("base_names"),
-                    minimum=2,
-                )
-                payload = {
-                    "companyId": company_id,
-                    "aimYear": str(year),
-                    "companyStartMonth": start_month,
-                    "baseId": [base.base_id for base in bases],
-                }
-                data = self.gateway.compare_emissions_by_base(
-                    payload, auth_token=bearer_token
-                )
-                chart = _base_comparison_chart(
-                    data, company_id, company_name, bases, year
-                )
-                audit_details["base_ids"] = [base.base_id for base in bases]
-            elif tool_name == "compare_emission_periods_chart":
-                first = _validated_period(
-                    arguments.get("start_month"), arguments.get("end_month")
-                )
-                second = _validated_period(
-                    arguments.get("comparison_start_month"),
-                    arguments.get("comparison_end_month"),
-                )
-                payload = _period_comparison_payload(
-                    company_id, first, second, start_month
-                )
-                data = self.gateway.compare_emissions_by_duration(
-                    payload, auth_token=bearer_token
-                )
-                chart = _period_comparison_chart(
-                    data, company_id, company_name, first, second
-                )
-                audit_details.update(
-                    {
-                        "period_start": first[0],
-                        "period_end": first[1],
-                        "comparison_period": f"{second[0]}-{second[1]}",
-                    }
-                )
+                answer = _breakdown_answer(data, company_name, year, locale)
             else:
-                raise RequestValidationError("tool_not_implemented")
-            answer = (
-                _period_comparison_answer(chart, locale)
-                if tool_name == "compare_emission_periods_chart"
-                else _chart_answer(chart, locale)
-            )
+                start_month = self._company_start_month_cached(
+                    execution, principal, company_id, bearer_token
+                )
+                if tool_name == "get_scope_composition_chart":
+                    if scope is None:
+                        raise RequestValidationError("scope_required")
+                    data = self.gateway.get_scope_summary(
+                        company_id,
+                        year,
+                        start_month,
+                        scope,
+                        locale,
+                        auth_token=bearer_token,
+                    )
+                    chart = _composition_chart(
+                        data, company_id, company_name, year, scope
+                    )
+                elif tool_name == "get_monthly_emission_trend_chart":
+                    data = self.gateway.get_scope_emission_for_month(
+                        company_id,
+                        year,
+                        start_month,
+                        scope,
+                        locale,
+                        auth_token=bearer_token,
+                    )
+                    chart = _monthly_chart(data, company_id, company_name, year)
+                elif tool_name == "get_top_emission_activities_chart":
+                    data = self.gateway.get_top_activity_items_by_emission(
+                        company_id, year, start_month, locale, auth_token=bearer_token
+                    )
+                    chart = _top_chart(data, company_id, company_name, year)
+                elif tool_name == "get_base_detail_monthly_chart":
+                    base = self._resolve_base(
+                        execution,
+                        principal,
+                        company_id,
+                        locale,
+                        bearer_token,
+                        base_id=arguments.get("base_id"),
+                        base_name=arguments.get("base_name"),
+                    )
+                    data = self.gateway.get_base_month_emission(
+                        company_id,
+                        base.base_id,
+                        year,
+                        start_month,
+                        auth_token=bearer_token,
+                    )
+                    chart = _base_detail_monthly_chart(
+                        data, company_id, company_name, base, year
+                    )
+                    audit_details["base_ids"] = [base.base_id]
+                elif tool_name == "get_base_detail_composition_chart":
+                    base = self._resolve_base(
+                        execution,
+                        principal,
+                        company_id,
+                        locale,
+                        bearer_token,
+                        base_id=arguments.get("base_id"),
+                        base_name=arguments.get("base_name"),
+                    )
+                    period_start, period_end = _fiscal_months(year, start_month)
+                    data = self.gateway.get_base_large_item_emission(
+                        company_id,
+                        base.base_id,
+                        period_start,
+                        period_end,
+                        auth_token=bearer_token,
+                    )
+                    chart = _base_detail_composition_chart(
+                        data, company_id, company_name, base, year
+                    )
+                    audit_details["base_ids"] = [base.base_id]
+                elif tool_name == "get_base_emission_composition_chart":
+                    period_start, period_end = _fiscal_months(year, start_month)
+                    group_by = _group_by(arguments.get("group_by"))
+                    payload = {
+                        "companyId": company_id,
+                        "year": year,
+                        "companyStartMonth": start_month,
+                        "startMonth": period_start,
+                        "endMonth": period_end,
+                        "baseList": [],
+                        "dynamicTab": group_by,
+                    }
+                    data = self.gateway.get_base_type_emission(
+                        payload, auth_token=bearer_token
+                    )
+                    chart = _base_group_composition_chart(
+                        data, company_id, company_name, year, group_by
+                    )
+                elif tool_name == "get_base_monthly_emission_chart":
+                    bases = self._resolve_bases(
+                        execution,
+                        principal,
+                        company_id,
+                        locale,
+                        bearer_token,
+                        base_ids=arguments.get("base_ids"),
+                        base_names=arguments.get("base_names"),
+                        minimum=1,
+                    )
+                    group_by = _group_by(arguments.get("group_by"))
+                    period_start, period_end = _fiscal_months(year, start_month)
+                    payload = {
+                        "companyId": company_id,
+                        "year": year,
+                        "companyStartMonth": start_month,
+                        "startMonth": period_start,
+                        "endMonth": period_end,
+                        "baseList": [base.base_id for base in bases],
+                        "dynamicTab": group_by,
+                    }
+                    data = self.gateway.get_base_type_emission_for_month(
+                        payload, auth_token=bearer_token
+                    )
+                    chart = _base_group_monthly_chart(
+                        data, company_id, company_name, bases, year
+                    )
+                    audit_details["base_ids"] = [base.base_id for base in bases]
+                elif tool_name == "compare_base_emissions_chart":
+                    bases = self._resolve_bases(
+                        execution,
+                        principal,
+                        company_id,
+                        locale,
+                        bearer_token,
+                        base_ids=arguments.get("base_ids"),
+                        base_names=arguments.get("base_names"),
+                        minimum=2,
+                    )
+                    payload = {
+                        "companyId": company_id,
+                        "aimYear": str(year),
+                        "companyStartMonth": start_month,
+                        "baseId": [base.base_id for base in bases],
+                    }
+                    data = self.gateway.compare_emissions_by_base(
+                        payload, auth_token=bearer_token
+                    )
+                    chart = _base_comparison_chart(
+                        data, company_id, company_name, bases, year
+                    )
+                    audit_details["base_ids"] = [base.base_id for base in bases]
+                elif tool_name == "compare_emission_periods_chart":
+                    first = _validated_period(
+                        arguments.get("start_month"), arguments.get("end_month")
+                    )
+                    second = _validated_period(
+                        arguments.get("comparison_start_month"),
+                        arguments.get("comparison_end_month"),
+                    )
+                    payload = _period_comparison_payload(
+                        company_id, first, second, start_month
+                    )
+                    data = self.gateway.compare_emissions_by_duration(
+                        payload, auth_token=bearer_token
+                    )
+                    chart = _period_comparison_chart(
+                        data, company_id, company_name, first, second
+                    )
+                    audit_details.update(
+                        {
+                            "period_start": first[0],
+                            "period_end": first[1],
+                            "comparison_period": f"{second[0]}-{second[1]}",
+                        }
+                    )
+                else:
+                    raise RequestValidationError("tool_not_implemented")
+                answer = (
+                    _period_comparison_answer(chart, locale)
+                    if tool_name == "compare_emission_periods_chart"
+                    else _chart_answer(chart, locale)
+                )
+        except ValueError as exc:
+            raise RequestValidationError("invalid_chart_payload") from exc
 
         self.repository.write_audit(
             {
@@ -619,11 +633,24 @@ def _select_tool(message: str) -> str:
 
 
 def _year(value: Any, message: str) -> Optional[int]:
-    if value is not None:
-        year = int(value)
-        return year if 2000 <= year <= 2100 else None
-    match = re.search(r"\b(20\d{2})\b", message)
+    if value is not None and str(value).strip() != "":
+        try:
+            year = int(value)
+        except (TypeError, ValueError):
+            match = re.search(r"(20\d{2})", str(value))
+            if match:
+                return int(match.group(1))
+        else:
+            return year if 2000 <= year <= 2100 else None
+    match = re.search(r"\b(20\d{2})\b", message) or re.search(r"(20\d{2})", message)
     return int(match.group(1)) if match else None
+
+
+def _coalesce(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def _scope(message: str) -> Optional[int]:
@@ -1020,11 +1047,13 @@ def _base_comparison_chart(
 ) -> ChartSpec:
     rows = _rows(payload)
     series = []
-    for index, base in enumerate(bases[:5]):
+    for base in bases[:5]:
         row = next(
             (item for item in rows if str(item.get("baseId")) == base.base_id),
-            rows[index] if index < len(rows) else {},
+            None,
         )
+        if row is None:
+            raise RequestValidationError("base_comparison_data_missing")
         series.append(
             ChartSeries(
                 name=base.name,

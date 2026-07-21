@@ -46,5 +46,15 @@ class RequestLimiter:
             yield
         finally:
             with self._lock:
-                self._active[user_id] = max(0, self._active[user_id] - 1)
-
+                remaining = max(0, self._active[user_id] - 1)
+                if remaining == 0:
+                    self._active.pop(user_id, None)
+                else:
+                    self._active[user_id] = remaining
+                requests = self._requests.get(user_id)
+                if requests is not None:
+                    cutoff = self.clock() - 60
+                    while requests and requests[0] <= cutoff:
+                        requests.popleft()
+                    if not requests:
+                        self._requests.pop(user_id, None)

@@ -2,6 +2,9 @@ import json
 import tempfile
 import unittest
 
+from tests.fakes import FakeCmpfGateway
+
+
 
 class FakePlanner:
     def __init__(self, decision):
@@ -12,10 +15,10 @@ class FakePlanner:
 
 
 class CmpfAgentTest(unittest.TestCase):
-    def test_mock_gateway_returns_dashboard_summary(self):
+    def test_fake_gateway_returns_dashboard_summary(self):
         from ai_native.gateway.cmpf_client import CmpfGateway
 
-        gateway = CmpfGateway(mode="mock")
+        gateway = FakeCmpfGateway()
 
         summary = gateway.get_dashboard_summary(company_id="cmpf-demo", year=2025)
 
@@ -44,7 +47,6 @@ class CmpfAgentTest(unittest.TestCase):
                 return Response()
 
         gateway = CmpfGateway(
-            mode="http",
             carbon_api_base_url="http://localhost:8080/api",
             auth_token="token-1",
             http_client=FakeHttpClient(),
@@ -85,7 +87,6 @@ class CmpfAgentTest(unittest.TestCase):
                 return Response()
 
         gateway = CmpfGateway(
-            mode="http",
             carbon_api_base_url="http://localhost:8080/api",
             auth_token="env-token",
             http_client=FakeHttpClient(),
@@ -118,7 +119,6 @@ class CmpfAgentTest(unittest.TestCase):
                 return Response()
 
         gateway = CmpfGateway(
-            mode="http",
             carbon_api_base_url="http://localhost:8080/api",
             http_client=FakeHttpClient(),
         )
@@ -135,7 +135,7 @@ class CmpfAgentTest(unittest.TestCase):
         from ai_native.agent.graph import build_graph
         from ai_native.gateway.cmpf_client import CmpfGateway
 
-        graph = build_graph(CmpfGateway(mode="mock"))
+        graph = build_graph(FakeCmpfGateway())
 
         result = graph.invoke(
             {
@@ -175,7 +175,6 @@ class CmpfAgentTest(unittest.TestCase):
                 return Response()
 
         gateway = CmpfGateway(
-            mode="http",
             carbon_api_base_url="http://localhost:8080",
             http_client=FakeHttpClient(),
         )
@@ -213,7 +212,6 @@ class CmpfAgentTest(unittest.TestCase):
                 return Response()
 
         gateway = CmpfGateway(
-            mode="http",
             user_api_base_url="http://localhost:3333",
             http_client=FakeHttpClient(),
         )
@@ -316,7 +314,7 @@ class CmpfAgentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             audit_path = f"{tmpdir}/audit.jsonl"
             registry = ToolRegistry(
-                gateway=CmpfGateway(mode="mock"),
+                gateway=FakeCmpfGateway(),
                 audit_logger=JsonlAuditLogger(audit_path),
             )
 
@@ -383,7 +381,7 @@ class CmpfAgentTest(unittest.TestCase):
         from ai_native.agent.graph import build_graph
         from ai_native.gateway.cmpf_client import CmpfGateway
 
-        graph = build_graph(CmpfGateway(mode="mock"))
+        graph = build_graph(FakeCmpfGateway())
 
         result = graph.invoke(
             {
@@ -410,7 +408,7 @@ class CmpfAgentTest(unittest.TestCase):
         from ai_native.gateway.cmpf_client import CmpfGateway
 
         graph = build_graph(
-            CmpfGateway(mode="mock"),
+            FakeCmpfGateway(),
             planner=FakePlanner(
                 ToolCallDecision(
                     tool_name="get_scope_breakdown",
@@ -493,7 +491,7 @@ class CmpfAgentTest(unittest.TestCase):
 
         answer = _format_company_info_answer(
             {
-                "source": "mock",
+                "source": "cmpf",
                 "company_id": "cmpf-demo",
                 "company_info": [
                     {
@@ -519,7 +517,7 @@ class CmpfAgentTest(unittest.TestCase):
         from ai_native.gateway.cmpf_client import CmpfGateway
 
         client = TestClient(
-            create_app(use_env_planner=False, gateway=CmpfGateway(mode="mock"))
+            create_app(use_env_planner=False, gateway=FakeCmpfGateway())
         )
 
         health = client.get("/health")
@@ -540,7 +538,7 @@ class CmpfAgentTest(unittest.TestCase):
         from ai_native.gateway.cmpf_client import CmpfGateway
 
         client = TestClient(
-            create_app(use_env_planner=False, gateway=CmpfGateway(mode="mock"))
+            create_app(use_env_planner=False, gateway=FakeCmpfGateway())
         )
 
         response = client.post("/v1/conversations", json={})
@@ -569,7 +567,7 @@ class CmpfAgentTest(unittest.TestCase):
             create_app(
                 use_env_planner=False,
                 token_client=token_client,
-                gateway=CmpfGateway(mode="mock"),
+                gateway=FakeCmpfGateway(),
             )
         )
 
@@ -600,7 +598,7 @@ class CmpfAgentTest(unittest.TestCase):
             create_app(
                 use_env_planner=False,
                 token_client=FakeTokenClient(),
-                gateway=CmpfGateway(mode="mock"),
+                gateway=FakeCmpfGateway(),
             )
         )
 
@@ -618,7 +616,7 @@ class CmpfAgentTest(unittest.TestCase):
         from ai_native.gateway.cmpf_client import CmpfGateway
 
         client = TestClient(
-            create_app(use_env_planner=False, gateway=CmpfGateway(mode="mock"))
+            create_app(use_env_planner=False, gateway=FakeCmpfGateway())
         )
 
         response = client.get("/")
