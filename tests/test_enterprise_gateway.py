@@ -160,16 +160,20 @@ class SecurityBoundaryTest(unittest.TestCase):
 
 class DocumentationContractTest(unittest.TestCase):
     def test_readme_documents_emission_analysis_loop(self):
-        readme = Path("README.md").read_text(encoding="utf-8")
+        zh = Path("README.md").read_text(encoding="utf-8")
+        en = Path("README.en.md").read_text(encoding="utf-8")
 
-        self.assertIn("compare_emission_periods_chart", readme)
-        self.assertIn("/analysis/compareByDuration", readme)
-        self.assertIn("three preparation", readme)
+        for readme in (zh, en):
+            self.assertIn("compare_emission_periods_chart", readme)
+            self.assertIn("/analysis/compareByDuration", readme)
+        self.assertIn("三次准备", zh)
+        self.assertIn("three preparation", en)
 
 
 class ControlledLoopDocumentationTest(unittest.TestCase):
     def test_readme_documents_runtime_and_observability(self):
-        readme = Path("README.md").read_text(encoding="utf-8")
+        zh = Path("README.md").read_text(encoding="utf-8")
+        en = Path("README.en.md").read_text(encoding="utf-8")
         for required in (
             "Policy-gated ReAct",
             "waiting_for_user",
@@ -179,7 +183,10 @@ class ControlledLoopDocumentationTest(unittest.TestCase):
             "/runs/{runId}/cancel",
             "checkpoint",
         ):
-            self.assertIn(required, readme)
+            self.assertIn(required, zh)
+            self.assertIn(required, en)
+        self.assertIn("[English](README.en.md)", zh)
+        self.assertIn("[中文](README.md)", en)
 
 
 class CmpfAnalysisContractTest(unittest.TestCase):
