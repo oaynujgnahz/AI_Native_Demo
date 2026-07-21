@@ -40,14 +40,15 @@ planner -> responder -> end
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
-export CMPF_GATEWAY_MODE=mock
+cp .env.example .env   # set real CMPF / Keycloak / LLM values
+export CMPF_GATEWAY_MODE=http
 export CMPF_AGENT_DEMO_MODE=true
-export CMPF_AGENT_DEMO_TOKEN=cmpf-demo-token
+export CMPF_AGENT_DEMO_TOKEN='replace-with-a-local-secret'
 unset DATABASE_URL
 .venv/bin/uvicorn ai_native.api:app --host 127.0.0.1 --port 8787
 ```
 
-没有 `DATABASE_URL` 时，conversation/run/artifact 与 checkpoint 都使用进程内存。它适合本地 mock demo；重启进程后不能 resume。浏览器 Demo 的 Keycloak 登录路径面向真实环境，mock 流程可使用下方的 demo token curl。
+Gateway **only supports real CMPF HTTP APIs** (`CMPF_GATEWAY_MODE=mock` is rejected). Without `DATABASE_URL`, conversation/run/artifact and checkpoint storage stay in-process memory (fine for local demos; resume does not survive restart). Unit tests use `tests/fakes.py`, not mock business data. Browser Demo Keycloak login targets a real environment; the demo-token curl below is only for explicit local demo auth.
 
 创建 conversation 并开始 SSE request：
 
@@ -165,7 +166,7 @@ Copy or source `.env.example` as appropriate. Important variables are:
 
 | Variable | Purpose / default |
 | --- | --- |
-| `CMPF_GATEWAY_MODE` | `mock` or `http`; HTTP mode requires reachable CMPF services. |
+| `CMPF_GATEWAY_MODE` | Must be `http` (or unset). `mock` is rejected. |
 | `CMPF_CARBON_API_BASE_URL`, `CMPF_USER_API_BASE_URL` | Existing CMPF Carbon/User API bases. |
 | `CMPF_LANG`, `CMPF_SITE_NAME` | Existing CMPF request defaults, when applicable. |
 | `CMPF_KEYCLOAK_BASE_URL`, `CMPF_KEYCLOAK_REALM`, `CMPF_KEYCLOAK_ISSUER` | Keycloak discovery/issuer configuration. |

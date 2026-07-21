@@ -106,7 +106,18 @@ class EnterpriseToolExecutor:
             or principal.company_id
         )
         year = _year(
-            validated_arguments.get("year", context.get("year")), message
+            next(
+                (
+                    value
+                    for value in (
+                        validated_arguments.get("year"),
+                        context.get("year"),
+                    )
+                    if value is not None
+                ),
+                None,
+            ),
+            message,
         )
         scope = _scope_value(validated_arguments.get("scope"), message)
         locale = _locale(context.get("locale") or principal.locale)

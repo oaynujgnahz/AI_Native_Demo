@@ -398,30 +398,6 @@ class CmpfGateway:
         if scope is not None:
             params["scope"] = scope
         return params
-    
-    def _mock_dashboard_summary(self, company_id: str, year: int) -> Dict[str, Any]:
-        scope1 = 1250.4
-        scope2 = 2860.8
-        scope3 = 9320.6
-        total = round(scope1 + scope2 + scope3, 1)
-        return {
-            "source": "mock", "company_id": company_id, "year": year,
-            "scope1_tco2e": scope1, "scope2_tco2e": scope2,
-            "scope3_tco2e": scope3, "total_tco2e": total,
-        }
-
-    def _mock_scope_breakdown(self, company_id: str, year: int) -> Dict[str, Any]:
-        return {"body": [
-                {"scope": "Scope1", "emission_tco2e": 1250.4, "share": "9.3%"},
-                {"scope": "Scope2", "emission_tco2e": 2860.8, "share": "21.3%"},
-                {"scope": "Scope3", "emission_tco2e": 9320.6, "share": "69.4%"},
-            ]}
-    def _mock_get_company_info(self, company_id: str) -> Dict[str, Any]:
-        return {"body": {
-            "source": "mock", "companyId": company_id, "companyName": "Mock Company",
-            "companyAddress": "123 Main St", "companyPhone": "123-456-7890",
-            "companyEmail": "info@mockcompany.com",
-        }}
 
 
 def _result_count(payload: Any) -> int:

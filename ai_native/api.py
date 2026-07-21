@@ -373,6 +373,7 @@ def create_app(
             raise HTTPException(
                 status_code=404, detail={"code": "conversation_not_found"}
             )
+        active_run = None
         try:
             with request_limiter.limit(principal.user_id):
                 allowed_company_ids = _allowed_company_ids(
@@ -444,12 +445,14 @@ def create_app(
                 status_code=429, detail={"code": "rate_limited"}
             ) from exc
         except CompanyForbiddenError as exc:
-            _mark_run_failed(conversation_repository, active_run)
+            if active_run is not None:
+                _mark_run_failed(conversation_repository, active_run)
             raise HTTPException(
                 status_code=403, detail={"code": "company_forbidden"}
             ) from exc
         except RequestValidationError as exc:
-            _mark_run_failed(conversation_repository, active_run)
+            if active_run is not None:
+                _mark_run_failed(conversation_repository, active_run)
             detail = {"code": exc.code}
             if exc.candidates:
                 detail["candidates"] = exc.candidates

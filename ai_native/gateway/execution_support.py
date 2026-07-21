@@ -10,10 +10,16 @@ from ai_native.gateway.errors import RequestValidationError
 
 
 def year(value: Any, message: str) -> int | None:
-    if value is not None:
-        parsed = int(value)
-        return parsed if 2000 <= parsed <= 2100 else None
-    match = re.search(r"\b(20\d{2})\b", message)
+    if value is not None and str(value).strip() != "":
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            match = re.search(r"(20\d{2})", str(value))
+            if match:
+                return int(match.group(1))
+        else:
+            return parsed if 2000 <= parsed <= 2100 else None
+    match = re.search(r"\b(20\d{2})\b", message) or re.search(r"(20\d{2})", message)
     return int(match.group(1)) if match else None
 
 
@@ -316,11 +322,13 @@ def base_comparison_chart(
 ) -> ChartSpec:
     rows = _rows(payload)
     series = []
-    for index, base in enumerate(bases[:5]):
+    for base in bases[:5]:
         row = next(
             (item for item in rows if str(item.get("baseId")) == base.base_id),
-            rows[index] if index < len(rows) else {},
+            None,
         )
+        if row is None:
+            raise RequestValidationError("base_comparison_data_missing")
         series.append(
             ChartSeries(
                 name=base.name,

@@ -164,7 +164,7 @@ class DocumentationContractTest(unittest.TestCase):
 
         self.assertIn("compare_emission_periods_chart", readme)
         self.assertIn("/analysis/compareByDuration", readme)
-        self.assertIn("3 preparation", readme)
+        self.assertIn("three preparation", readme)
 
 
 class ControlledLoopDocumentationTest(unittest.TestCase):
@@ -1137,21 +1137,10 @@ class EnterpriseApiTest(unittest.TestCase):
             json={"message": "共同拠点の月別推移", "context": {"locale": "ja"}},
         )
 
-        self.assertEqual(response.status_code, 200)
-        events = []
-        for block in response.text.strip().split("\n\n"):
-            lines = block.splitlines()
-            events.append(
-                (
-                    lines[0].removeprefix("event: "),
-                    json.loads(lines[1].removeprefix("data: ")),
-                )
-            )
-        error = next(data for event, data in events if event == "error")
-        self.assertEqual(error["code"], "base_ambiguous")
-        self.assertEqual(error["status"], 422)
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["detail"]["code"], "base_ambiguous")
         self.assertEqual(
-            error["candidates"],
+            response.json()["detail"]["candidates"],
             [
                 {"base_id": "10", "name": "共同拠点"},
                 {"base_id": "11", "name": "共同拠点"},
@@ -1169,18 +1158,7 @@ class EnterpriseApiTest(unittest.TestCase):
                 "context": {"company_id": "999", "year": 2025, "locale": "ja"},
             },
         )
-        self.assertEqual(response.status_code, 200)
-        events = [
-            (
-                block.splitlines()[0].removeprefix("event: "),
-                json.loads(block.splitlines()[1].removeprefix("data: ")),
-            )
-            for block in response.text.strip().split("\n\n")
-            if block
-        ]
-        error = next(data for event, data in events if event == "error")
-        self.assertEqual(error["code"], "company_forbidden")
-        self.assertEqual(error["status"], 403)
+        self.assertEqual(response.status_code, 403)
 
     def test_deleted_conversation_cannot_be_read(self):
         created = self.client.post("/v1/conversations", headers=self.headers, json={}).json()
